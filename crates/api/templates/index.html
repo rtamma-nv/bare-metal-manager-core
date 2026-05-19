@@ -89,7 +89,7 @@
 						<table>
 							<tr>
 								<th>Monitor run interval</th>
-								<td>{{ config.monitor_run_interval }}</td>
+								<td>{{ config.monitor_run_interval.as_secs() }}s</td>
 							</tr>
 							<tr>
 								<th>Allow insecure</th>
