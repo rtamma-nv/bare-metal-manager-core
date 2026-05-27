@@ -2253,6 +2253,8 @@ async fn test_instance_delete_with_nvl_config_use_nmxc_simulator(pool: sqlx::PgP
     env.run_nvl_partition_monitor_iteration().await;
     env.run_nvl_partition_monitor_iteration().await;
 
+    env.run_nvl_partition_monitor_iteration().await;
+
     let request_all = tonic::Request::new(rpc::forge::NvLinkPartitionSearchFilter {
         name: None,
         tenant_organization_id: None,
@@ -2265,4 +2267,73 @@ async fn test_instance_delete_with_nvl_config_use_nmxc_simulator(pool: sqlx::PgP
         .map(|response| response.into_inner())
         .unwrap();
     assert_eq!(ids_all.partition_ids.len(), 0);
+}
+
+
+#[crate::sqlx_test]
+async fn test_managed_host_creation_with_tray_default_partition_use_nmxc_simulator(pool: sqlx::PgPool) {
+    if !nmxc_simulator_tests_enabled() {
+        println!(
+            "skipping test_instance_delete_with_nvl_config_use_nmxc_simulator as nmxc simulator tests are not enabled"
+        );
+        return;
+    }
+
+    let mut config = common::api_fixtures::get_config();
+    if let Some(nvlink_config) = config.nvlink_config.as_mut() {
+        nvlink_config.enabled = true;
+    }
+
+    let mut test_overrides = TestEnvOverrides::with_config(config);
+    test_overrides.nmxc_simulator = Some(true);
+
+    let env =
+        common::api_fixtures::create_test_env_with_overrides(pool.clone(), test_overrides).await;
+
+    let _segment_id = env.create_vpc_and_tenant_segment().await;
+
+
+    let mh = create_managed_host_with_hardware_info_template(
+        &env,
+        HardwareInfoTemplate::Custom(
+            crate::tests::common::api_fixtures::host::GB200_COMPUTE_TRAY_4_INFO_JSON,
+        ),
+    )
+    .await;
+    let machine = mh.host().rpc_machine().await;
+
+    assert_eq!(&machine.state, "Ready");
+    let discovery_info = machine.discovery_info.as_ref().unwrap();
+
+    assert_eq!(discovery_info.gpus.len(), 4);
+
+    let gpus: Vec<Gpu> = discovery_info.gpus.to_vec();
+
+    println!("{gpus:?}");
+
+
+    // Run twice to record observation.
+    env.run_nvl_partition_monitor_iteration().await;
+    env.run_nvl_partition_monitor_iteration().await;
+    env.run_nvl_partition_monitor_iteration().await;
+
+    let mut nmxc_sim_client = env
+        .nmxc_sim
+        .create_client(libnmxc::Endpoint::new("http://localhost:9601").expect("NMX-C endpoint URI"))
+        .await
+        .unwrap();
+    let nmxc_partitions = nmxc_sim_client
+        .get_partition_info_list(GetPartitionInfoListRequest {
+            context: Some(libnmxc::nmxc_model::Context {
+                context: String::new(),
+            }),
+            partition_id_list: vec![],
+            partition_name_list: vec![],
+            gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
+        })
+        .await
+        .unwrap()
+        .partition_info_list;
+    assert_eq!(nmxc_partitions.len(), 1);
+    assert_eq!(nmxc_partitions[0].name, "tray_partition_1");
 }
