@@ -57,13 +57,40 @@ use tracing::Instrument;
 /// Default NMX-M instance identifier for credentials and client lookup when none is specified.
 pub const DEFAULT_NMX_M_NAME: &str = "default";
 
-/// Multicast groups limit for new NMX-C partitions: floor(1024 / 36).
-const NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT: u32 = 1024 / 36;
+/// Multicast groups limit for new NMX-C partitions. Assuming at most 2 partitions per tray and 
+// 18 tray default partitions, this is set to floor(1024 / (36+18)).
+const NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT: u32 = 1024 / (36 + 18);
 
-fn nmx_c_partition_create_attr() -> libnmxc::nmxc_model::PartitionAttr {
+fn nmx_c_partition_create_attr_with_multicast_groups_limit(
+    multicast_groups_limit: u32,
+) -> libnmxc::nmxc_model::PartitionAttr {
     libnmxc::nmxc_model::PartitionAttr {
         resiliency_mode: libnmxc::nmxc_model::ResiliencyMode::NmxResiliencyModeUndefined as i32,
-        multicast_groups_limit: NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT,
+        multicast_groups_limit,
+    }
+}
+
+fn nmx_c_create_partition_request(
+    name: String,
+    gpu_uids: &[u64],
+    multicast_groups_limit: u32,
+) -> libnmxc::nmxc_model::CreatePartitionRequest {
+    libnmxc::nmxc_model::CreatePartitionRequest {
+        context: None,
+        name,
+        gpu_resource_id: gpu_uids
+            .iter()
+            .map(|&uid| libnmxc::nmxc_model::GpuResourceId {
+                resource_id: Some(
+                    libnmxc::nmxc_model::gpu_resource_id::ResourceId::GpuUid(uid),
+                ),
+            })
+            .collect(),
+        attr: Some(nmx_c_partition_create_attr_with_multicast_groups_limit(
+            multicast_groups_limit,
+        )),
+        partition_id: None,
+        gateway_id: NMX_C_GATEWAY_ID.into(),
     }
 }
 
@@ -1476,10 +1503,6 @@ impl NvlPartitionMonitor {
         }
 
         if partition_ctx.delete_nmx_c_default_partition_if_present() {
-            tracing::info!(
-                machine_id = %mh.host_snapshot.id,
-                "Deleting NMX-C default partition for admin-network machine without instance"
-            );
             return Ok(());
         }
 
@@ -1643,25 +1666,31 @@ impl NvlPartitionMonitor {
                             );
                             name.chars().take(240).collect::<String>()
                         };
-                        let request = libnmxc::nmxc_model::CreatePartitionRequest {
-                            context: None,
-                            name,
-                            gpu_resource_id: operation
-                                .gpu_uids
-                                .iter()
-                                .map(|&uid| libnmxc::nmxc_model::GpuResourceId {
-                                    resource_id: Some(
-                                        libnmxc::nmxc_model::gpu_resource_id::ResourceId::GpuUid(
-                                            uid,
-                                        ),
-                                    ),
-                                })
-                                .collect(),
-                            attr: Some(nmx_c_partition_create_attr()),
-                            partition_id: None,
-                            gateway_id: NMX_C_GATEWAY_ID.into(),
-                        };
+                        let request = nmx_c_create_partition_request(
+                            name.clone(),
+                            &operation.gpu_uids,
+                            NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT,
+                        );
                         match nmxc_client.create_partition(request).await {
+                            Err(e) if e.is_nmx_resource_exhausted() => {
+                                tracing::info!(
+                                    %logical_partition_id,
+                                    partition_name = %name,
+                                    "NMX-C create partition returned NMX_ST_RESOURCE_EXHAUSTED; retrying with multicast_groups_limit=0"
+                                );
+                                let retry_request =
+                                    nmx_c_create_partition_request(name, &operation.gpu_uids, 0);
+                                match nmxc_client.create_partition(retry_request).await {
+                                    Ok(_) => true,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            %logical_partition_id,
+                                            "Failed to retry create partition on NMX-C with multicast_groups_limit=0: {e}"
+                                        );
+                                        false
+                                    }
+                                }
+                            }
                             Ok(_) => true,
                             Err(e) => {
                                 tracing::warn!(
@@ -1762,15 +1791,16 @@ impl NvlPartitionMonitor {
                                         name: String::new(),
                                         reroute: true,
                                     };
-                                    if let Err(e) =
-                                        nmxc_client.remove_gpus_from_partition(req).await
-                                    {
-                                        tracing::warn!(
-                                            %logical_partition_id,
-                                            %nmx_c_partition_id,
-                                            "Failed to remove GPUs from partition on NMX-C: {e}"
-                                        );
-                                        ok = false;
+                                    match nmxc_client.remove_gpus_from_partition(req).await {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                %logical_partition_id,
+                                                %nmx_c_partition_id,
+                                                "Failed to remove GPUs from partition on NMX-C: {e}"
+                                            );
+                                            ok = false;
+                                        }
                                     }
                                 }
                                 if ok && !to_add.is_empty() {
@@ -1783,13 +1813,16 @@ impl NvlPartitionMonitor {
                                         name: String::new(),
                                         reroute: true,
                                     };
-                                    if let Err(e) = nmxc_client.add_gpus_to_partition(req).await {
-                                        tracing::warn!(
-                                            %logical_partition_id,
-                                            %nmx_c_partition_id,
-                                            "Failed to add GPUs to partition on NMX-C: {e}"
-                                        );
-                                        ok = false;
+                                    match nmxc_client.add_gpus_to_partition(req).await {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                %logical_partition_id,
+                                                %nmx_c_partition_id,
+                                                "Failed to add GPUs to partition on NMX-C: {e}"
+                                            );
+                                            ok = false;
+                                        }
                                     }
                                 }
                                 ok

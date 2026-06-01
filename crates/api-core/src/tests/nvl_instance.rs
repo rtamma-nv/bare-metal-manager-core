@@ -15,25 +15,24 @@
  * limitations under the License.
  */
 
-//use rpc::forge::NvlPartitionSearchFilter;
 use ::rpc::machine_discovery::Gpu;
 use carbide_uuid::nvlink::NvLinkPartitionId;
 use common::api_fixtures::create_managed_host_with_hardware_info_template;
 use common::api_fixtures::instance::{
     create_instance_with_nvlink_config, update_instance_nvlink_config,
 };
-use common::api_fixtures::managed_host::HardwareInfoTemplate;
-use common::api_fixtures::nvl_logical_partition::create_nvl_logical_partition;
-use db::{self, nvl_partition as db_nvl_partition};
 use libnmxc::nmxc_model::{
     CreatePartitionRequest, GetPartitionInfoListRequest, UpdatePartitionRequest,
 };
+
+use common::api_fixtures::managed_host::HardwareInfoTemplate;
+use common::api_fixtures::nvl_logical_partition::create_nvl_logical_partition;
+use db::{self, nvl_partition as db_nvl_partition};
 use model::instance::config::nvlink::InstanceNvLinkConfig;
 use model::nvl_partition::{NewNvlPartition, NvlPartitionName};
 use rpc::forge::TenantState;
 use rpc::forge::forge_server::Forge;
 
-// model::instance::config::nvlink::{InstanceNvLinkConfig, InstanceNvLinkGpuConfig},
 use crate::tests::common;
 use crate::tests::common::api_fixtures::TestEnvOverrides;
 use crate::tests::common::api_fixtures::nvl_logical_partition::NvlLogicalPartitionFixture;
