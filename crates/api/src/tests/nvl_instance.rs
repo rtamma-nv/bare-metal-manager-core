@@ -21,9 +21,12 @@ use common::api_fixtures::create_managed_host_with_hardware_info_template;
 use common::api_fixtures::instance::{
     create_instance_with_nvlink_config, update_instance_nvlink_config,
 };
+use libnmxc::nmxc_model::{
+    CreatePartitionRequest, GetPartitionInfoListRequest, UpdatePartitionRequest,
+};
+
 use common::api_fixtures::managed_host::HardwareInfoTemplate;
 use common::api_fixtures::nvl_logical_partition::create_nvl_logical_partition;
-use libnmxc::nmxc_model::GetPartitionInfoListRequest;
 use model::instance::config::nvlink::InstanceNvLinkConfig;
 use rpc::forge::TenantState;
 use rpc::forge::forge_server::Forge;
@@ -2336,4 +2339,144 @@ async fn test_managed_host_creation_with_tray_default_partition_use_nmxc_simulat
         .partition_info_list;
     assert_eq!(nmxc_partitions.len(), 1);
     assert_eq!(nmxc_partitions[0].name, "tray_partition_1");
+}
+#[crate::sqlx_test]
+async fn test_update_nvlink_config_nmxm_existing_partitions_with_nmxc_simulator(
+    pool: sqlx::PgPool,
+) {
+    if !nmxc_simulator_tests_enabled() {
+        println!(
+            "skipping test_update_nvlink_config_nmxm_existing_partitions_with_nmxc_simulator as nmxc simulator tests are not enabled"
+        );
+        return;
+    }
+
+    let mut config = common::api_fixtures::get_config();
+    if let Some(nvlink_config) = config.nvlink_config.as_mut() {
+        nvlink_config.enabled = true;
+    }
+
+    let mut test_overrides = TestEnvOverrides::with_config(config);
+    test_overrides.nmxc_simulator = Some(true);
+
+    let env =
+        common::api_fixtures::create_test_env_with_overrides(pool.clone(), test_overrides).await;
+
+    let _segment_id = env.create_vpc_and_tenant_segment().await;
+
+    let NvlLogicalPartitionFixture {
+        id: _logical_partition_id,
+        logical_partition: _logical_partition,
+    } = create_nvl_logical_partition(&env, "test_partition".to_string()).await;
+
+    let request_logical_ids =
+        tonic::Request::new(rpc::forge::NvLinkLogicalPartitionSearchFilter { name: None });
+
+    let logical_ids_list = env
+        .api
+        .find_nv_link_logical_partition_ids(request_logical_ids)
+        .await
+        .map(|response| response.into_inner())
+        .unwrap();
+    assert_eq!(logical_ids_list.partition_ids.len(), 1);
+
+    let mh = create_managed_host_with_hardware_info_template(
+        &env,
+        HardwareInfoTemplate::Custom(
+            crate::tests::common::api_fixtures::host::GB200_COMPUTE_TRAY_4_INFO_JSON,
+        ),
+    )
+    .await;
+    let machine = mh.host().rpc_machine().await;
+
+    assert_eq!(&machine.state, "Ready");
+    let discovery_info = machine.discovery_info.as_ref().unwrap();
+
+    assert_eq!(discovery_info.gpus.len(), 4);
+
+    let gpus: Vec<Gpu> = discovery_info.gpus.to_vec();
+
+    let gpu_uids: Vec<u64> = gpus
+        .iter()
+        .filter_map(|gpu| {
+            gpu.platform_info.as_ref().map(|platform_info| {
+                let s = platform_info.fabric_guid.trim();
+                if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                    u64::from_str_radix(hex, 16).unwrap_or(0)
+                } else {
+                    s.parse::<u64>().unwrap_or(0)
+                }
+            })
+        })
+        .collect();
+    assert_eq!(gpu_uids.len(), 4);
+
+    let mut nmxc_sim_client = env
+        .nmxc_sim
+        .create_client(libnmxc::Endpoint::new("http://localhost:9601").expect("NMX-C endpoint URI"))
+        .await
+        .unwrap();
+
+    const NMXC_DEFAULT_PARTITION_ID: u32 = 32766;
+    nmxc_sim_client
+        .remove_gpus_from_partition(UpdatePartitionRequest {
+            context: None,
+            partition_id: Some(libnmxc::nmxc_model::PartitionId {
+                partition_id: NMXC_DEFAULT_PARTITION_ID,
+            }),
+            location_list: vec![],
+            gpu_uid: gpu_uids.clone(),
+            gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
+            name: String::new(),
+            reroute: true,
+        })
+        .await
+        .expect("remove host GPUs from default NMX-C partition");
+
+        println!("\n\n\n\n\n\n\n creating 1\n");
+    // create a NMX-C partition with all the GPUs from the managed host. This is used to simulate the case
+    // as if NMX-M created the partition
+    nmxc_sim_client
+        .create_partition(CreatePartitionRequest {
+            context: None,
+            name: "test-existing-nmxc-partition".to_string(),
+            gpu_resource_id: gpu_uids
+                .iter()
+                .map(|&uid| libnmxc::nmxc_model::GpuResourceId {
+                    resource_id: Some(libnmxc::nmxc_model::gpu_resource_id::ResourceId::GpuUid(
+                        uid,
+                    )),
+                })
+                .collect(),
+            attr: None,
+            partition_id: None,
+            gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
+        })
+        .await
+        .expect("create NMX-C partition for managed host GPUs");
+
+        println!("\n\n\n\n\n\n\n creating 2\n");
+
+    nmxc_sim_client
+        .create_partition(CreatePartitionRequest {
+            context: None,
+            name: "test-existing-nmxc-partition".to_string(),
+            gpu_resource_id: gpu_uids
+                .iter()
+                .map(|&uid| libnmxc::nmxc_model::GpuResourceId {
+                    resource_id: Some(libnmxc::nmxc_model::gpu_resource_id::ResourceId::GpuUid(
+                        uid,
+                    )),
+                })
+                .collect(),
+            attr: None,
+            partition_id: None,
+            gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
+        })
+        .await
+        .expect("create NMX-C partition for managed host GPUs");
+
+
+
+
 }
