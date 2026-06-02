@@ -225,6 +225,11 @@ pub mod test_support {
                 ..Default::default()
             }
         }
+
+        /// True when `endpoint` carries a URL from `nvlink_nmxc_endpoints` (non-empty host).
+        fn nvlink_nmxc_endpoint_is_set(endpoint: &Endpoint) -> bool {
+            endpoint.uri.host().is_some_and(|host| !host.is_empty())
+        }
     }
 
     #[::async_trait::async_trait]
@@ -512,13 +517,15 @@ pub mod test_support {
 
     #[::async_trait::async_trait]
     impl NmxcPool for NmxcSimClient {
-        async fn create_client(&self, _endpoint: Endpoint) -> Result<Box<dyn Nmxc>, NmxcError> {
+        async fn create_client(&self, endpoint: Endpoint) -> Result<Box<dyn Nmxc>, NmxcError> {
             if let Some(pool) = &self._grpc_pool {
-                let ep = self
-                    ._simulator_endpoint
-                    .as_ref()
-                    .expect("simulator mode must set _simulator_endpoint")
-                    .clone();
+                let ep = if Self::nvlink_nmxc_endpoint_is_set(&endpoint) {
+                    endpoint
+                } else {
+                    self._simulator_endpoint
+                        .clone()
+                        .expect("simulator mode must set _simulator_endpoint")
+                };
                 return pool.create_client(ep).await;
             }
             Ok(Box::new(NmxcSimClient {
