@@ -52,7 +52,10 @@ impl Nmxc for NmxcApi {
             major_version: nmxc_model::ProtoMsgMajorVersion::ProtoMsgMajorVersion as i32,
             minor_version: nmxc_model::ProtoMsgMinorVersion::ProtoMsgMinorVersion as i32,
         };
-        Ok(nmx_c_checked!("Hello", self.client.hello(tonic::Request::new(req))))
+        Ok(nmx_c_checked!(
+            "Hello",
+            self.client.hello(tonic::Request::new(req))
+        ))
     }
 
     async fn get_domain_properties(

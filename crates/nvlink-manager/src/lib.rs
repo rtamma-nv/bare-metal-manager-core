@@ -57,7 +57,7 @@ use tracing::Instrument;
 /// Default NMX-M instance identifier for credentials and client lookup when none is specified.
 pub const DEFAULT_NMX_M_NAME: &str = "default";
 
-/// Multicast groups limit for new NMX-C partitions. Assuming at most 2 partitions per tray and 
+/// Multicast groups limit for new NMX-C partitions. Assuming at most 2 partitions per tray and
 // 18 tray default partitions, this is set to floor(1024 / (36+18)).
 const NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT: u32 = 1024 / (36 + 18);
 
@@ -81,9 +81,9 @@ fn nmx_c_create_partition_request(
         gpu_resource_id: gpu_uids
             .iter()
             .map(|&uid| libnmxc::nmxc_model::GpuResourceId {
-                resource_id: Some(
-                    libnmxc::nmxc_model::gpu_resource_id::ResourceId::GpuUid(uid),
-                ),
+                resource_id: Some(libnmxc::nmxc_model::gpu_resource_id::ResourceId::GpuUid(
+                    uid,
+                )),
             })
             .collect(),
         attr: Some(nmx_c_partition_create_attr_with_multicast_groups_limit(
@@ -1421,7 +1421,9 @@ impl NvlPartitionMonitor {
         {
             let operation = NmxcPartitionOperation {
                 domain_uuid: None,
-                operation_type: NmxcPartitionOperationType::RemoveUnknownPartition(default_nmx_c_id),
+                operation_type: NmxcPartitionOperationType::RemoveUnknownPartition(
+                    default_nmx_c_id,
+                ),
                 gpu_uids: vec![],
                 name: String::new(),
                 db_partition_id: None,
@@ -1445,7 +1447,8 @@ impl NvlPartitionMonitor {
                 })
                 .or_insert(vec![operation.clone()]);
         }
-        for (_, operation) in std::mem::take(&mut partition_ctx.pending_tray_partition_creates_by_slot)
+        for (_, operation) in
+            std::mem::take(&mut partition_ctx.pending_tray_partition_creates_by_slot)
         {
             partition_ctx
                 .nmx_c_operations
@@ -1503,8 +1506,11 @@ impl NvlPartitionMonitor {
         }
 
         if partition_ctx.delete_nmx_c_default_partition_if_present() {
+            println!("\n\n\n\n\nDeleting NMX-C default partition");
             return Ok(());
         }
+
+        println!("\n\n\n\n\nNot deleting NMX-C default partition");
 
         if let Some(nvlink_info) = &mh.host_snapshot.nvlink_info {
             for gpu in &nvlink_info.gpus {
@@ -1601,7 +1607,7 @@ impl NvlPartitionMonitor {
                         gpus_to_keep,
                     )?;
                 }
-/*
+                /*
                 partition_ctx.ensure_gpu_enqueued_into_tray_partition(
                     &mh.host_snapshot.id,
                     nvlink_info.domain_uuid,
@@ -1671,11 +1677,12 @@ impl NvlPartitionMonitor {
                             &operation.gpu_uids,
                             NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT,
                         );
-                        match nmxc_client.create_partition(request).await {
+                        match nmxc_client.create_partition(request.clone()).await {
                             Err(e) if e.is_nmx_resource_exhausted() => {
                                 tracing::info!(
                                     %logical_partition_id,
                                     partition_name = %name,
+                                    create_partition_request = ?request,
                                     "NMX-C create partition returned NMX_ST_RESOURCE_EXHAUSTED; retrying with multicast_groups_limit=0"
                                 );
                                 let retry_request =
@@ -1695,6 +1702,7 @@ impl NvlPartitionMonitor {
                             Err(e) => {
                                 tracing::warn!(
                                     %logical_partition_id,
+                                    create_partition_request = ?request,
                                     "Failed to issue create partition to NMX-C, continuing with other operations: {e}"
                                 );
                                 false

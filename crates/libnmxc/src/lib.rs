@@ -78,8 +78,7 @@ impl NmxcError {
 
     /// True when NMX-C returned `NMX_ST_RESOURCE_EXHAUSTED`.
     pub fn is_nmx_resource_exhausted(&self) -> bool {
-        self.nmx_return_code()
-            == Some(nmxc_model::StReturnCode::NmxStResourceExhausted as i32)
+        self.nmx_return_code() == Some(nmxc_model::StReturnCode::NmxStResourceExhausted as i32)
     }
 }
 
