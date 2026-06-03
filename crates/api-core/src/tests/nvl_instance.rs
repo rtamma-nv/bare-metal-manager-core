@@ -2230,6 +2230,10 @@ async fn test_create_instance_with_nvl_config_mtls_use_nmxc_simulator(pool: sqlx
     run_create_instance_with_nvl_config_nmxc_simulator_scenario(pool, true).await;
 }
 
+// This test creates two instances in the same logical partition but on different domains.
+// This test relies on having two NMX-C simulator instances running on ports 9601 and 9602.
+// Simulator running on port 9601 simulates a tray as defined in GB200_COMPUTE_TRAY_4_INFO_JSON.
+// Simulator running on port 9602 simulates a tray as defined in GB200_COMPUTE_TRAY_5_INFO_JSON.
 #[crate::sqlx_test]
 async fn test_create_instance_multiple_domains_use_nmxc_simulator(pool: sqlx::PgPool) {
     if !nmxc_simulator_tests_enabled() {

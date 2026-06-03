@@ -154,8 +154,6 @@ pub struct PartitionProcessingContext {
     unknown_partition_addition_operations: HashMap<u32, NmxcPartitionOperation>,
     /// Pending NMX-C `Create` for tray default partitions (key: GPU `slot_id`), merged after scanning hosts.
     pending_tray_partition_creates_by_slot: HashMap<i32, NmxcPartitionOperation>,
-    /// At most one `RemoveUnknownPartition` for the NMX-C default partition this monitor pass (e.g. admin-network cleanup).
-    pending_delete_nmx_c_default_partition_once: Option<u32>,
 }
 
 fn nmx_c_partition_id_string(pi: &PartitionInfo) -> String {
@@ -207,27 +205,31 @@ impl PartitionProcessingContext {
             unknown_partition_removal_operations: HashMap::new(),
             unknown_partition_addition_operations: HashMap::new(),
             pending_tray_partition_creates_by_slot: HashMap::new(),
-            pending_delete_nmx_c_default_partition_once: None,
         }
     }
 
-    /// If an NMX-C default partition exists, schedule deleting it at most once this monitor pass.
-    /// Returns `true` when a removal was already scheduled or this call newly scheduled it.
-    fn delete_nmx_c_default_partition_if_present(&mut self) -> bool {
-        if self.pending_delete_nmx_c_default_partition_once.is_some() {
-            return true;
-        }
-        let Some(default_pi) = self
+    /// If the NMX-C default partition exists, enqueue its removal and return true.
+    fn enqueue_nmx_c_default_partition_removal_if_present(&mut self) -> bool {
+        let Some(default_nmx_c_id) = self
             .nmx_c_partitions
             .values()
             .find(|p| is_nmx_c_default_partition(p))
+            .and_then(|p| p.partition_id.map(|id| id.partition_id))
         else {
             return false;
         };
-        let Some(pid) = default_pi.partition_id else {
-            return false;
-        };
-        self.pending_delete_nmx_c_default_partition_once = Some(pid.partition_id);
+        self.nmx_c_operations
+            .entry(NvLinkLogicalPartitionId::default())
+            .or_default()
+            .push(NmxcPartitionOperation {
+                domain_uuid: None,
+                operation_type: NmxcPartitionOperationType::RemoveUnknownPartition(
+                    default_nmx_c_id,
+                ),
+                gpu_uids: vec![],
+                name: String::new(),
+                db_partition_id: None,
+            });
         true
     }
 
@@ -1120,6 +1122,12 @@ impl NvlPartitionMonitor {
     ) -> NvLinkManagerResult<HashMap<MachineId, MachineNvLinkStatusObservation>> {
         let mut machine_gpu_statuses = HashMap::new();
 
+        // If the default partition is present, enqueue a removal operation and return early.
+        // no observations will be generated
+        if partition_ctx.enqueue_nmx_c_default_partition_removal_if_present() {
+            return Ok(machine_gpu_statuses);
+        }
+
         for mh in mh_snapshots.values() {
             metrics.num_machines_scanned += 1;
             let Some(instance) = &mh.instance else {
@@ -1416,26 +1424,6 @@ impl NvlPartitionMonitor {
                     .or_insert(vec![operation.clone()]);
             }
         }
-        if let Some(default_nmx_c_id) =
-            std::mem::take(&mut partition_ctx.pending_delete_nmx_c_default_partition_once)
-        {
-            let operation = NmxcPartitionOperation {
-                domain_uuid: None,
-                operation_type: NmxcPartitionOperationType::RemoveUnknownPartition(
-                    default_nmx_c_id,
-                ),
-                gpu_uids: vec![],
-                name: String::new(),
-                db_partition_id: None,
-            };
-            partition_ctx
-                .nmx_c_operations
-                .entry(NvLinkLogicalPartitionId::default())
-                .and_modify(|ops| {
-                    ops.push(operation.clone());
-                })
-                .or_insert(vec![operation]);
-        }
         for (_partition_nmx_c_id, operation) in
             partition_ctx.unknown_partition_addition_operations.iter()
         {
@@ -1504,13 +1492,6 @@ impl NvlPartitionMonitor {
         if !mh.use_admin_network() {
             return Ok(());
         }
-
-        if partition_ctx.delete_nmx_c_default_partition_if_present() {
-            println!("\n\n\n\n\nDeleting NMX-C default partition");
-            return Ok(());
-        }
-
-        println!("\n\n\n\n\nNot deleting NMX-C default partition");
 
         if let Some(nvlink_info) = &mh.host_snapshot.nvlink_info {
             for gpu in &nvlink_info.gpus {
