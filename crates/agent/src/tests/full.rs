@@ -94,6 +94,14 @@ async fn test_traffic_intercept_bridging() -> eyre::Result<()> {
             vf_intercept_bridge_ip: "10.10.10.2".to_string(),
             vf_intercept_bridge_name: "pfdpu000br-dpu".to_string(),
             intercept_bridge_prefix_len: 29,
+            host_representor_bridge_vni_mappings: vec![
+                traffic_intercept_bridging::TrafficInterceptBridgeMapping {
+                    bridge: "pf0-br".to_string(),
+                    vni: 333,
+                    patch_port: "patch-pf01".to_string(),
+                    gateway: "10.1.1.0/31".to_string(),
+                },
+            ],
         },
     )?;
 
@@ -462,7 +470,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         internal_uuid: None,
         mtu: None,
         ipv6_interface_config: None,
-        routing_profile: None,
+        vpc_routing_profile: None,
+        interface_routing_profile: None,
     };
     assert_eq!(admin_interface.svi_ip, None);
 
@@ -632,7 +641,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         internal_uuid: None,
         mtu: None,
         ipv6_interface_config: None,
-        routing_profile: None,
+        vpc_routing_profile: None,
+        interface_routing_profile: None,
     };
 
     let network_security_policy_overrides = vec![
@@ -777,6 +787,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
                     virtual_function_id: None,
                     ip_address: None,
                     ipv6_interface_config: None,
+                    routing_profile: None,
                 }],
                 auto: false,
             }),
@@ -784,6 +795,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             network_security_group_id: None,
             dpu_extension_services: None,
             nvlink: None,
+            spxconfig: None,
 
         }),
         status: Some(rpc::InstanceStatus {
@@ -817,6 +829,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             }),
             configs_synced: rpc::SyncState::Synced.into(),
             update: None,
+            spx_status: None,
         }),
         network_config_version: "V1-T1748645613333257".to_string(),
         ib_config_version: "V1-T1748645613333260".to_string(),
@@ -860,11 +873,11 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         traffic_intercept_config: Some(rpc::forge::TrafficInterceptConfig {
             bridging: Some(rpc::forge::TrafficInterceptBridging {
                 internal_bridge_routing_prefix: "10.255.255.0/29".to_string(),
-                host_intercept_bridge_name: "br-host".to_string(),
+                hbn_bridge: "br-hbn".to_string(),
                 vf_intercept_bridge_name: "br-dpu".to_string(),
                 vf_intercept_bridge_port: "pfdpu000br-dpu".to_string(),
                 vf_intercept_bridge_sf: "pf0dpu5".to_string(),
-                host_intercept_bridge_port: "pfdpu000br-host".to_string(),
+                host_representor_intercept_bridging: Default::default(),
             }),
             additional_overlay_vtep_ip: Some("10.2.2.1".to_string()),
             public_prefixes: vec!["7.8.0.0/16".to_string()],

@@ -6,10 +6,13 @@ This document explains the configuration files for the Component Manager system.
 
 The Component Manager configuration controls:
 1. Which implementation to use for each component type (compute, NVL switch, power shelf)
-2. Which API providers to enable and their settings
+2. Manager behavior settings for selected implementations
+3. Which API providers to enable and their client settings
 
-Timing parameters for power control and firmware update operations are configured
-**per-rule** via action parameters in operation rules, not in the component manager config.
+Timing parameters for power control and firmware update operations are generally
+configured **per-rule** via action parameters in operation rules. Manager-wide
+behavior settings, such as compute power-call staggering, live under
+`manager_configs`.
 
 ## Configuration Files
 
@@ -30,7 +33,7 @@ with the embedded defaults.
 ```yaml
 component_managers:
   compute: <implementation>
-  nvlswitch: <implementation>
+  nvswitch: <implementation>
   powershelf: <implementation>
 ```
 
@@ -43,20 +46,15 @@ Available implementations:
 
 | Component Type | Available Implementations | Description |
 |----------------|---------------------------|-------------|
-| `compute` | `nico`, `mock` | Manages compute nodes |
-| `nvlswitch` | `nico`, `nvswitchmanager`, `mock` | Manages NVLink switches |
-| `powershelf` | `nico`, `psm`, `mock` | Manages power shelves |
+| `compute` | `nicolegacy`, `nico`, `mock` | Manages compute nodes. `nicolegacy` (current default) calls NICo Core's machine-centric RPCs (`AdminPowerControl`, `SetFirmwareUpdateTimeWindow`, ...). `nico` routes through Core's Component Manager dispatch (`ComponentPowerControl`, `UpdateComponentFirmware`, ...) like nvswitch and powershelf already do. See [Selecting the compute implementation](#selecting-the-compute-implementation) for the migration knob. |
+| `nvswitch` | `nico`, `mock` | Manages NVLink switches |
+| `powershelf` | `nico`, `mock` | Manages power shelves |
 
 ### Providers
 
 ```yaml
 providers:
   nico:
-    timeout: "<duration>"
-    compute_power_delay: "<duration>"
-  nvswitchmanager:
-    timeout: "<duration>"
-  psm:
     timeout: "<duration>"
 ```
 
@@ -68,16 +66,30 @@ equivalent to omitting the section for provider-backed component managers.
 
 | Provider | Used By | Description |
 |----------|---------|-------------|
-| `nico` | compute, nvlswitch, powershelf/nico | NICo API for machine management |
-| `nvswitchmanager` | nvlswitch/nvswitchmanager | NV-Switch Manager API for NVLink switch management |
-| `psm` | powershelf/psm | Power Shelf Manager API |
+| `nico` | compute, nvswitch, powershelf | NICo API for component management |
+
+### Manager Configs
+
+```yaml
+manager_configs:
+  compute:
+    nicolegacy:
+      compute_power_delay: "<duration>"
+```
+
+Configures behavior for a selected component manager implementation. The keys
+are the descriptor identity: component type, then implementation name. Entries
+must match the selected `component_managers` implementation.
+
+| Manager | Option | Type | Default | Description |
+|---------|--------|------|---------|-------------|
+| `compute/nicolegacy` | `compute_power_delay` | duration string | `2s` | Delay between sequential power control calls for compute trays. Prevents overwhelming the power delivery system. Set to `0s` to disable. |
 
 #### Provider Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `timeout` | duration string | `1m` (nico, nvswitchmanager), `30s` (psm) | gRPC call timeout |
-| `compute_power_delay` | duration string | `2s` (nico only) | Delay between sequential power control calls for compute trays. Prevents overwhelming the power delivery system. Set to `0s` to disable. |
+| `timeout` | duration string | `1m` | gRPC call timeout |
 
 Duration strings use Go format: `30s`, `1m`, `2m30s`, etc.
 
@@ -88,14 +100,18 @@ Duration strings use Go format: `30s`, `1m`, `2m30s`, etc.
 ```yaml
 # Equivalent to builtin.LoadConfig("")
 component_managers:
-  compute: nico
-  nvlswitch: nico
+  compute: nicolegacy
+  nvswitch: nico
   powershelf: nico
+
+manager_configs:
+  compute:
+    nicolegacy:
+      compute_power_delay: "2s"
 
 providers:
   nico:
     timeout: "1m"
-    compute_power_delay: "2s"
 ```
 
 ### Test Configuration
@@ -104,7 +120,7 @@ providers:
 # Uses mock implementations - no external dependencies
 component_managers:
   compute: mock
-  nvlswitch: mock
+  nvswitch: mock
   powershelf: mock
 
 # No providers section needed for mock implementations
@@ -113,14 +129,14 @@ component_managers:
 ### Mixed Configuration (e.g., partial testing)
 
 ```yaml
-# Real power shelf management, mock compute/nvlswitch
+# Real power shelf management via NICo, mock compute/nvswitch
 component_managers:
   compute: mock
-  nvlswitch: mock
-  powershelf: psm
+  nvswitch: mock
+  powershelf: nico
 
 providers:
-  psm:
+  nico:
     timeout: "30s"
 ```
 
@@ -129,33 +145,28 @@ providers:
 Providers are automatically enabled based on the component manager implementations:
 
 - If any component uses `nico` → NICo provider is enabled with defaults
-- If `nvlswitch` uses `nvswitchmanager` → NV-Switch Manager provider is enabled with defaults
-- If `powershelf` uses `psm` → PSM provider is enabled with defaults
 
 This allows minimal configuration:
 
 ```yaml
 component_managers:
-  compute: nico
-  nvlswitch: nvswitchmanager
-  powershelf: psm
-# Providers auto-enabled based on implementations above
+  compute: nicolegacy
+  nvswitch: nico
+  powershelf: nico
+# nico provider auto-enabled based on implementations above
 ```
 
-Provider entries can override only the providers that need non-default settings:
+Provider entries can override settings:
 
 ```yaml
 component_managers:
-  compute: nico
-  nvlswitch: nvswitchmanager
-  powershelf: psm
+  compute: nicolegacy
+  nvswitch: nico
+  powershelf: nico
 
 providers:
-  nvswitchmanager:
+  nico:
     timeout: "1m30s"
-  psm:
-    timeout: "45s"
-# nico is still added with defaults
 ```
 
 ## Usage
@@ -165,6 +176,33 @@ Set the configuration file path via:
 1. **Command line flag**: `--component-config <path>`
 2. **Environment variable**: `COMPONENT_MANAGER_CONFIG=<path>`
 3. **Default**: embedded service config
+
+### Selecting the compute implementation
+
+Compute currently has two NICo-backed implementations:
+
+| Implementation | RPC path | Notes |
+|----------------|----------|-------|
+| `nicolegacy` (default) | `AdminPowerControl`, `UpdatePowerOption`, `SetMachineAutoUpdate`, `SetFirmwareUpdateTimeWindow` | Existing machine-centric path. Honours `manager_configs.compute.nicolegacy.compute_power_delay` and the legacy `start_time` / `end_time` firmware window. |
+| `nico` | `ComponentPowerControl`, `GetComponentInventory`, `UpdateComponentFirmware`, `GetComponentFirmwareStatus` | New Component Manager dispatch path, identical to `nvswitch/nico` and `powershelf/nico`. Honours `info.SubTargets` (BMC, BIOS, ...) and forwards `target_version` verbatim to Core (the SoT firmware-object identifier). Does **not** consume the firmware time window — Core dispatches immediately. Requires Core to be configured with `compute_tray_use_state_controller=true` (see `crates/component-manager/src/config.rs`). |
+
+To flip a deployment from the legacy path to the Component Manager path
+without shipping a separate component manager YAML, set the
+`COMPONENT_MANAGER_COMPUTE` environment variable on the Flow service:
+
+```bash
+# Use the new Component Manager-based path
+COMPONENT_MANAGER_COMPUTE=nico
+
+# Use the legacy machine-centric path (same as the embedded default)
+COMPONENT_MANAGER_COMPUTE=nicolegacy
+```
+
+The override is consumed by `flow serve` after the base config is
+loaded and replaces only the `compute` entry in `component_managers`.
+An invalid value surfaces as a normal startup failure during catalog
+validation. Once every Flow deployment has been flipped to `nico` the
+override and the `compute/nicolegacy` package will be removed.
 
 ## Timing Parameters
 

@@ -1,19 +1,5 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 package model
 
@@ -28,8 +14,10 @@ import (
 	"github.com/NVIDIA/infra-controller-rest/api/pkg/api/model/util"
 	cdb "github.com/NVIDIA/infra-controller-rest/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller-rest/db/pkg/db/model"
+	cwssaws "github.com/NVIDIA/infra-controller-rest/workflow-schema/schema/site-agent/workflows/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewAPIInstance(t *testing.T) {
@@ -2304,30 +2292,6 @@ func Test_getAggregatedInstanceStatus(t *testing.T) {
 			},
 			want: cdbm.InstancePowerStatusError,
 		},
-		{
-			name: "Repairing overlays Rebooting power status like Ready",
-			args: args{
-				status:      cdbm.InstanceStatusRepairing,
-				powerStatus: cdb.GetStrPtr(cdbm.InstancePowerStatusRebooting),
-			},
-			want: cdbm.InstancePowerStatusRebooting,
-		},
-		{
-			name: "Repairing overlays Error power status like Ready",
-			args: args{
-				status:      cdbm.InstanceStatusRepairing,
-				powerStatus: cdb.GetStrPtr(cdbm.InstancePowerStatusError),
-			},
-			want: cdbm.InstancePowerStatusError,
-		},
-		{
-			name: "non-ready status does not overlay power status during repair-unrelated states",
-			args: args{
-				status:      cdbm.InstanceStatusUpdating,
-				powerStatus: cdb.GetStrPtr(cdbm.InstancePowerStatusRebooting),
-			},
-			want: cdbm.InstanceStatusUpdating,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2340,7 +2304,7 @@ func Test_getAggregatedInstanceStatus(t *testing.T) {
 
 func TestAPIInstanceDeleteRequest_Validate(t *testing.T) {
 	type fields struct {
-		MachineHealthIssue *APIMachineHealthIssueReport
+		MachineHealthIssue *APIMachineHealthIssue
 		IsRepairTenant     *bool
 	}
 	tests := []struct {
@@ -2351,7 +2315,7 @@ func TestAPIInstanceDeleteRequest_Validate(t *testing.T) {
 		{
 			name: "test valid Instance delete request",
 			fields: fields{
-				MachineHealthIssue: &APIMachineHealthIssueReport{
+				MachineHealthIssue: &APIMachineHealthIssue{
 					Category: "Hardware",
 					Summary:  cdb.GetStrPtr("Test summary"),
 					Details:  cdb.GetStrPtr("Test details"),
@@ -2363,7 +2327,7 @@ func TestAPIInstanceDeleteRequest_Validate(t *testing.T) {
 		{
 			name: "test invalid Instance delete request - invalid machine health issue category",
 			fields: fields{
-				MachineHealthIssue: &APIMachineHealthIssueReport{
+				MachineHealthIssue: &APIMachineHealthIssue{
 					Category: "Invalid",
 				},
 				IsRepairTenant: cdb.GetBoolPtr(true),
@@ -2373,7 +2337,7 @@ func TestAPIInstanceDeleteRequest_Validate(t *testing.T) {
 		{
 			name: "test invalid Instance delete request - required machine health issue summary",
 			fields: fields{
-				MachineHealthIssue: &APIMachineHealthIssueReport{
+				MachineHealthIssue: &APIMachineHealthIssue{
 					Category: "Hardware",
 				},
 				IsRepairTenant: cdb.GetBoolPtr(true),
@@ -2383,7 +2347,7 @@ func TestAPIInstanceDeleteRequest_Validate(t *testing.T) {
 		{
 			name: "test invalid Instance delete request - invalid category",
 			fields: fields{
-				MachineHealthIssue: &APIMachineHealthIssueReport{
+				MachineHealthIssue: &APIMachineHealthIssue{
 					Category: "Storage",
 					Summary:  cdb.GetStrPtr("Test summary"),
 					Details:  cdb.GetStrPtr(""),
@@ -2406,4 +2370,265 @@ func TestAPIInstanceDeleteRequest_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAPIInstanceCreateRequest_Validate_Auto exercises the `auto` /
+// `interfaces` exclusivity rules introduced for zero-DPU instances.
+func TestAPIInstanceCreateRequest_Validate_Auto(t *testing.T) {
+	tests := []struct {
+		name             string
+		req              APIInstanceCreateRequest
+		wantErr          bool
+		wantErrorMessage string
+	}{
+		{
+			name: "auto=true with empty interfaces succeeds",
+			req: APIInstanceCreateRequest{
+				Name:              "auto-instance",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    cdb.GetStrPtr(uuid.NewString()),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cdb.GetStrPtr(uuid.NewString()),
+				AutoNetwork:       true,
+				Interfaces:        nil,
+			},
+			wantErr: false,
+		},
+		{
+			name: "auto=true with interfaces is rejected",
+			req: APIInstanceCreateRequest{
+				Name:              "auto-instance",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    cdb.GetStrPtr(uuid.NewString()),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cdb.GetStrPtr(uuid.NewString()),
+				AutoNetwork:       true,
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{SubnetID: cdb.GetStrPtr(uuid.NewString())},
+				},
+			},
+			wantErr:          true,
+			wantErrorMessage: "`interfaces` must be empty when `autoNetwork` is true",
+		},
+		{
+			name: "auto=false with empty interfaces is rejected",
+			req: APIInstanceCreateRequest{
+				Name:              "manual-instance",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    cdb.GetStrPtr(uuid.NewString()),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cdb.GetStrPtr(uuid.NewString()),
+				AutoNetwork:       false,
+				Interfaces:        nil,
+			},
+			wantErr:          true,
+			wantErrorMessage: "at least one Interface must be specified",
+		},
+		{
+			name: "auto=true with secondaryVpcIds is rejected",
+			req: APIInstanceCreateRequest{
+				Name:              "auto-instance",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    cdb.GetStrPtr(uuid.NewString()),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cdb.GetStrPtr(uuid.NewString()),
+				AutoNetwork:       true,
+				SecondaryVpcIDs:   []string{uuid.NewString()},
+			},
+			wantErr:          true,
+			wantErrorMessage: "`secondaryVpcIds` is not supported when `autoNetwork` is true",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.req.Validate()
+			if (err != nil) != tt.wantErr {
+				marshalledErr, _ := json.Marshal(err)
+				t.Errorf("Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+			}
+			if tt.wantErrorMessage != "" && err != nil {
+				assert.Contains(t, err.Error(), tt.wantErrorMessage)
+			}
+		})
+	}
+}
+
+// TestAPIBatchInstanceCreateRequest_Validate_Auto mirrors the create-side
+// exclusivity rules for the batch endpoint.
+func TestAPIBatchInstanceCreateRequest_Validate_Auto(t *testing.T) {
+	tests := []struct {
+		name             string
+		req              APIBatchInstanceCreateRequest
+		wantErr          bool
+		wantErrorMessage string
+	}{
+		{
+			name: "auto=true with empty interfaces succeeds",
+			req: APIBatchInstanceCreateRequest{
+				NamePrefix:     "auto-batch",
+				Count:          2,
+				TenantID:       uuid.NewString(),
+				InstanceTypeID: uuid.NewString(),
+				VpcID:          uuid.NewString(),
+				IpxeScript:     cdb.GetStrPtr("test ipxe"),
+				AutoNetwork:    true,
+			},
+			wantErr: false,
+		},
+		{
+			name: "auto=true with interfaces is rejected",
+			req: APIBatchInstanceCreateRequest{
+				NamePrefix:     "auto-batch",
+				Count:          2,
+				TenantID:       uuid.NewString(),
+				InstanceTypeID: uuid.NewString(),
+				VpcID:          uuid.NewString(),
+				IpxeScript:     cdb.GetStrPtr("test ipxe"),
+				AutoNetwork:    true,
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{SubnetID: cdb.GetStrPtr(uuid.NewString())},
+				},
+			},
+			wantErr:          true,
+			wantErrorMessage: "`interfaces` must be empty when `autoNetwork` is true",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.req.Validate()
+			if (err != nil) != tt.wantErr {
+				marshalledErr, _ := json.Marshal(err)
+				t.Errorf("Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+			}
+			if tt.wantErrorMessage != "" && err != nil {
+				assert.Contains(t, err.Error(), tt.wantErrorMessage)
+			}
+		})
+	}
+}
+
+// TestAPIInstanceUpdateRequest_Validate_Auto covers the auto/interfaces
+// exclusivity rule when toggling auto via the update endpoint.
+func TestAPIInstanceUpdateRequest_Validate_Auto(t *testing.T) {
+	autoTrue := true
+	autoFalse := false
+	tests := []struct {
+		name             string
+		req              APIInstanceUpdateRequest
+		wantErr          bool
+		wantErrorMessage string
+	}{
+		{
+			name:    "auto unset leaves validation untouched",
+			req:     APIInstanceUpdateRequest{AutoNetwork: nil},
+			wantErr: false,
+		},
+		{
+			name:    "auto=true with no interfaces succeeds",
+			req:     APIInstanceUpdateRequest{AutoNetwork: &autoTrue},
+			wantErr: false,
+		},
+		{
+			name: "auto=true with interfaces is rejected",
+			req: APIInstanceUpdateRequest{
+				AutoNetwork: &autoTrue,
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{SubnetID: cdb.GetStrPtr(uuid.NewString())},
+				},
+			},
+			wantErr:          true,
+			wantErrorMessage: "`interfaces` must be empty when `autoNetwork` is true",
+		},
+		{
+			name: "auto=false with interfaces succeeds",
+			req: APIInstanceUpdateRequest{
+				AutoNetwork: &autoFalse,
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{SubnetID: cdb.GetStrPtr(uuid.NewString())},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "auto=true with secondaryVpcIds is rejected",
+			req: APIInstanceUpdateRequest{
+				AutoNetwork:     &autoTrue,
+				SecondaryVpcIDs: []string{uuid.NewString()},
+			},
+			wantErr:          true,
+			wantErrorMessage: "`secondaryVpcIds` is not supported when `autoNetwork` is true",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.req.Validate()
+			if (err != nil) != tt.wantErr {
+				marshalledErr, _ := json.Marshal(err)
+				t.Errorf("Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+			}
+			if tt.wantErrorMessage != "" && err != nil {
+				assert.Contains(t, err.Error(), tt.wantErrorMessage)
+			}
+		})
+	}
+}
+
+func TestAPIInstanceDeleteRequest_ToProto(t *testing.T) {
+	id := uuid.New()
+	ctrlID := uuid.New()
+	instance := &cdbm.Instance{ID: id, ControllerInstanceID: &ctrlID}
+
+	t.Run("empty request sources only the canonical ID", func(t *testing.T) {
+		req := APIInstanceDeleteRequest{}
+		got := req.ToProto(instance)
+		require.NotNil(t, got)
+		require.NotNil(t, got.Id)
+		assert.Equal(t, ctrlID.String(), got.Id.Value)
+		assert.Nil(t, got.Issue)
+		assert.Nil(t, got.IsRepairTenant)
+	})
+
+	t.Run("overlays MachineHealthIssue with summary and details", func(t *testing.T) {
+		req := APIInstanceDeleteRequest{
+			MachineHealthIssue: &APIMachineHealthIssue{
+				Category: MachineIssueCategoryHardware,
+				Summary:  cdb.GetStrPtr("burnt out NIC"),
+				Details:  cdb.GetStrPtr("port 0 returned link-down for 30 minutes"),
+			},
+		}
+		got := req.ToProto(instance)
+		require.NotNil(t, got)
+		require.NotNil(t, got.Issue)
+		assert.Equal(t, cwssaws.IssueCategory_HARDWARE, got.Issue.Category)
+		assert.Equal(t, "burnt out NIC", got.Issue.Summary)
+		assert.Equal(t, "port 0 returned link-down for 30 minutes", got.Issue.Details)
+	})
+
+	t.Run("MachineHealthIssue without optional pointers leaves Summary and Details empty", func(t *testing.T) {
+		req := APIInstanceDeleteRequest{
+			MachineHealthIssue: &APIMachineHealthIssue{
+				Category: MachineIssueCategoryOther,
+			},
+		}
+		got := req.ToProto(instance)
+		require.NotNil(t, got.Issue)
+		assert.Equal(t, cwssaws.IssueCategory_OTHER, got.Issue.Category)
+		assert.Equal(t, "", got.Issue.Summary)
+		assert.Equal(t, "", got.Issue.Details)
+	})
+
+	t.Run("overlays IsRepairTenant when set", func(t *testing.T) {
+		req := APIInstanceDeleteRequest{IsRepairTenant: cdb.GetBoolPtr(true)}
+		got := req.ToProto(instance)
+		require.NotNil(t, got.IsRepairTenant)
+		assert.True(t, *got.IsRepairTenant)
+	})
+
+	t.Run("uses Instance ID when ControllerInstanceID is nil", func(t *testing.T) {
+		bare := &cdbm.Instance{ID: id}
+		req := APIInstanceDeleteRequest{}
+		got := req.ToProto(bare)
+		require.NotNil(t, got.Id)
+		assert.Equal(t, id.String(), got.Id.Value)
+	})
 }

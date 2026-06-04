@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use forge_secrets::credentials::Credentials;
 use librms::RmsApi;
 use librms::protos::rack_manager as rms;
 use mac_address::MacAddress;
@@ -129,22 +130,20 @@ async fn resolve_switch_identities(
 
 fn to_rms_power_operation(action: PowerAction) -> i32 {
     match action {
-        PowerAction::On => rms::PowerOperation::PowerOn as i32,
-        PowerAction::GracefulShutdown | PowerAction::ForceOff => {
-            rms::PowerOperation::PowerOff as i32
-        }
+        PowerAction::On => rms::PowerOperation::On as i32,
+        PowerAction::GracefulShutdown | PowerAction::ForceOff => rms::PowerOperation::Off as i32,
         PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
-            rms::PowerOperation::PowerReset as i32
+            rms::PowerOperation::Reset as i32
         }
     }
 }
 
 fn map_rms_firmware_job_state(state: i32) -> FirmwareState {
     match rms::FirmwareJobState::try_from(state) {
-        Ok(rms::FirmwareJobState::FwJobQueued) => FirmwareState::Queued,
-        Ok(rms::FirmwareJobState::FwJobRunning) => FirmwareState::InProgress,
-        Ok(rms::FirmwareJobState::FwJobCompleted) => FirmwareState::Completed,
-        Ok(rms::FirmwareJobState::FwJobFailed) => FirmwareState::Failed,
+        Ok(rms::FirmwareJobState::Queued) => FirmwareState::Queued,
+        Ok(rms::FirmwareJobState::Running) => FirmwareState::InProgress,
+        Ok(rms::FirmwareJobState::Completed) => FirmwareState::Completed,
+        Ok(rms::FirmwareJobState::Failed) => FirmwareState::Failed,
         _ => FirmwareState::Unknown,
     }
 }
@@ -154,6 +153,32 @@ fn power_shelf_target_name(c: &PowerShelfComponent) -> &'static str {
     match c {
         PowerShelfComponent::Pmc => "pmc",
         PowerShelfComponent::Psu => "psu",
+    }
+}
+
+/// Default BMC HTTPS port used when populating `rms::Endpoint` for power
+/// shelves. Mirrors the value used by `crate::power_shelf_controller::maintenance`.
+const POWER_SHELF_BMC_PORT: u32 = 443;
+
+/// Build the `rms::NodeInfo` describing a power shelf for inclusion in a
+/// `BatchSetPowerState` request. The caller-supplied variant of the
+/// RPC requires the BMC connection details inline rather than relying on
+/// RMS's inventory; power shelves do not expose a host endpoint.
+fn build_power_shelf_node_info(ep: &PowerShelfEndpoint, identity: &RmsIdentity) -> rms::NodeInfo {
+    rms::NodeInfo {
+        node_id: identity.node_id.clone(),
+        rack_id: identity.rack_id.clone(),
+        r#type: Some(rms::NodeType::Powershelf as i32),
+        bmc_endpoint: Some(rms::Endpoint {
+            interface: Some(rms::NetworkInterface {
+                ip_address: ep.pmc_ip.to_string(),
+                mac_address: ep.pmc_mac.to_string(),
+            }),
+            port: POWER_SHELF_BMC_PORT,
+            credentials: Some(credentials_to_rms(&ep.pmc_credentials)),
+            dangerously_accept_invalid_certs: true,
+        }),
+        host_endpoint: None,
     }
 }
 
@@ -184,24 +209,22 @@ impl PowerShelfManager for RmsBackend {
                 continue;
             };
 
-            let request = rms::SetPowerStateRequest {
-                node_id: identity.node_id.clone(),
-                rack_id: identity.rack_id.clone(),
+            let device = build_power_shelf_node_info(ep, identity);
+            let request = rms::BatchSetPowerStateRequest {
+                nodes: Some(rms::NodeSet {
+                    nodes: vec![device],
+                }),
                 operation,
-                ..Default::default()
             };
 
-            match self.client.set_power_state(request).await {
+            match self.client.batch_set_power_state(request).await {
                 Ok(response) => {
-                    let success = response.status == rms::ReturnCode::Success as i32;
+                    let (success, error) =
+                        summarize_power_batch(response.response.unwrap_or_default());
                     results.push(PowerShelfComponentResult {
                         pmc_mac: ep.pmc_mac,
                         success,
-                        error: if success {
-                            None
-                        } else {
-                            Some("RMS power control failed".into())
-                        },
+                        error,
                     });
                 }
                 Err(e) => {
@@ -251,14 +274,14 @@ impl PowerShelfManager for RmsBackend {
                 continue;
             };
 
-            let request = rms::UpdateNodeFirmwareRequest {
+            let request = rms::UpdateFirmwareRequest {
                 node_id: identity.node_id.clone(),
                 rack_id: identity.rack_id.clone(),
                 firmware_targets: firmware_targets.clone(),
                 ..Default::default()
             };
 
-            match self.client.update_node_firmware_async(request).await {
+            match self.client.update_firmware(request).await {
                 Ok(response) => {
                     let success = response.status == rms::ReturnCode::Success as i32;
 
@@ -331,7 +354,6 @@ impl PowerShelfManager for RmsBackend {
 
             let request = rms::GetFirmwareJobStatusRequest {
                 job_id: job_id.clone(),
-                ..Default::default()
             };
 
             match self.client.get_firmware_job_status(request).await {
@@ -394,7 +416,6 @@ impl PowerShelfManager for RmsBackend {
             let request = rms::GetNodeFirmwareInventoryRequest {
                 node_id: identity.node_id.clone(),
                 rack_id: identity.rack_id.clone(),
-                ..Default::default()
             };
 
             match self.client.get_node_firmware_inventory(request).await {
@@ -445,7 +466,6 @@ async fn list_firmware_object_ids(
 ) -> Result<Vec<String>, ComponentManagerError> {
     let response = client
         .list_firmware_objects(rms::ListFirmwareObjectsRequest {
-            metadata: None,
             only_available: false,
             hardware_type: String::new(),
         })
@@ -467,6 +487,86 @@ fn switch_target_name(c: &NvSwitchComponent) -> &'static str {
         NvSwitchComponent::Bios => "bios",
         NvSwitchComponent::Nvos => "nvos",
     }
+}
+
+/// Default BMC HTTPS port used when populating `rms::Endpoint` for
+/// switches. Mirrors the value used by `crate::rack::firmware_update`.
+const SWITCH_BMC_PORT: u32 = 443;
+
+fn credentials_to_rms(creds: &Credentials) -> rms::Credentials {
+    let Credentials::UsernamePassword { username, password } = creds;
+    rms::Credentials {
+        auth: Some(rms::credentials::Auth::UserPass(rms::UsernamePassword {
+            username: username.clone(),
+            password: password.clone(),
+        })),
+    }
+}
+
+/// Build the `rms::NodeInfo` describing a switch for inclusion in a
+/// `BatchSetPowerState` request. The caller-supplied variant of the
+/// RPC requires the BMC connection details inline rather than relying on
+/// RMS's inventory; the NVOS host endpoint is included for completeness.
+fn build_switch_node_info(ep: &SwitchEndpoint, identity: &RmsIdentity) -> rms::NodeInfo {
+    rms::NodeInfo {
+        node_id: identity.node_id.clone(),
+        rack_id: identity.rack_id.clone(),
+        r#type: Some(rms::NodeType::Switch as i32),
+        bmc_endpoint: Some(rms::Endpoint {
+            interface: Some(rms::NetworkInterface {
+                ip_address: ep.bmc_ip.to_string(),
+                mac_address: ep.bmc_mac.to_string(),
+            }),
+            port: SWITCH_BMC_PORT,
+            credentials: Some(credentials_to_rms(&ep.bmc_credentials)),
+            dangerously_accept_invalid_certs: true,
+        }),
+        host_endpoint: Some(rms::Endpoint {
+            interface: Some(rms::NetworkInterface {
+                ip_address: ep.nvos_ip.to_string(),
+                mac_address: ep.nvos_mac.to_string(),
+            }),
+            port: 0,
+            credentials: Some(credentials_to_rms(&ep.nvos_credentials)),
+            dangerously_accept_invalid_certs: false,
+        }),
+    }
+}
+
+/// Summarize a `NodeBatchResponse` into a `(success, error)` pair for a
+/// single-node `BatchSetPowerState` call. Prefers per-node error
+/// messages, then the batch-level message, and finally a generic fallback.
+fn summarize_power_batch(batch: rms::NodeBatchResponse) -> (bool, Option<String>) {
+    let stats = batch.stats.unwrap_or_default();
+    let success = batch.status == rms::ReturnCode::Success as i32 && stats.failed_nodes == 0;
+
+    if success {
+        return (true, None);
+    }
+
+    let node_error = batch
+        .node_results
+        .into_iter()
+        .find(|r| r.status != rms::ReturnCode::Success as i32 || !r.error_message.is_empty())
+        .and_then(|r| {
+            if r.error_message.is_empty() {
+                None
+            } else {
+                Some(r.error_message)
+            }
+        });
+
+    let error = node_error
+        .or({
+            if batch.message.is_empty() {
+                None
+            } else {
+                Some(batch.message)
+            }
+        })
+        .unwrap_or_else(|| "RMS power control failed".to_owned());
+
+    (false, Some(error))
 }
 
 #[async_trait::async_trait]
@@ -496,24 +596,22 @@ impl NvSwitchManager for RmsBackend {
                 continue;
             };
 
-            let request = rms::SetPowerStateRequest {
-                node_id: identity.node_id.clone(),
-                rack_id: identity.rack_id.clone(),
+            let device = build_switch_node_info(ep, identity);
+            let request = rms::BatchSetPowerStateRequest {
+                nodes: Some(rms::NodeSet {
+                    nodes: vec![device],
+                }),
                 operation,
-                ..Default::default()
             };
 
-            match self.client.set_power_state(request).await {
+            match self.client.batch_set_power_state(request).await {
                 Ok(response) => {
-                    let success = response.status == rms::ReturnCode::Success as i32;
+                    let (success, error) =
+                        summarize_power_batch(response.response.unwrap_or_default());
                     results.push(SwitchComponentResult {
                         bmc_mac: ep.bmc_mac,
                         success,
-                        error: if success {
-                            None
-                        } else {
-                            Some("RMS power control failed".into())
-                        },
+                        error,
                     });
                 }
                 Err(e) => {
@@ -563,14 +661,14 @@ impl NvSwitchManager for RmsBackend {
                 continue;
             };
 
-            let request = rms::UpdateNodeFirmwareRequest {
+            let request = rms::UpdateFirmwareRequest {
                 node_id: identity.node_id.clone(),
                 rack_id: identity.rack_id.clone(),
                 firmware_targets: firmware_targets.clone(),
                 ..Default::default()
             };
 
-            match self.client.update_node_firmware_async(request).await {
+            match self.client.update_firmware(request).await {
                 Ok(response) => {
                     let success = response.status == rms::ReturnCode::Success as i32;
 
@@ -641,7 +739,6 @@ impl NvSwitchManager for RmsBackend {
 
             let request = rms::GetFirmwareJobStatusRequest {
                 job_id: job_id.clone(),
-                ..Default::default()
             };
 
             match self.client.get_firmware_job_status(request).await {
@@ -704,31 +801,31 @@ mod tests {
     // ---- Mapping unit tests ----
 
     #[test]
-    fn power_action_on_maps_to_power_on() {
+    fn power_action_on_maps_to_on() {
         assert_eq!(
             to_rms_power_operation(PowerAction::On),
-            rms::PowerOperation::PowerOn as i32,
+            rms::PowerOperation::On as i32,
         );
     }
 
     #[test]
-    fn power_action_shutdown_maps_to_power_off() {
+    fn power_action_shutdown_maps_to_off() {
         assert_eq!(
             to_rms_power_operation(PowerAction::GracefulShutdown),
-            rms::PowerOperation::PowerOff as i32,
+            rms::PowerOperation::Off as i32,
         );
     }
 
     #[test]
-    fn power_action_force_off_maps_to_power_off() {
+    fn power_action_force_off_maps_to_off() {
         assert_eq!(
             to_rms_power_operation(PowerAction::ForceOff),
-            rms::PowerOperation::PowerOff as i32,
+            rms::PowerOperation::Off as i32,
         );
     }
 
     #[test]
-    fn power_action_restart_maps_to_power_reset() {
+    fn power_action_restart_maps_to_reset() {
         for action in [
             PowerAction::GracefulRestart,
             PowerAction::ForceRestart,
@@ -736,8 +833,8 @@ mod tests {
         ] {
             assert_eq!(
                 to_rms_power_operation(action),
-                rms::PowerOperation::PowerReset as i32,
-                "expected PowerReset for {action:?}",
+                rms::PowerOperation::Reset as i32,
+                "expected Reset for {action:?}",
             );
         }
     }
@@ -745,7 +842,7 @@ mod tests {
     #[test]
     fn firmware_job_state_queued() {
         assert_eq!(
-            map_rms_firmware_job_state(rms::FirmwareJobState::FwJobQueued as i32),
+            map_rms_firmware_job_state(rms::FirmwareJobState::Queued as i32),
             FirmwareState::Queued,
         );
     }
@@ -753,7 +850,7 @@ mod tests {
     #[test]
     fn firmware_job_state_running() {
         assert_eq!(
-            map_rms_firmware_job_state(rms::FirmwareJobState::FwJobRunning as i32),
+            map_rms_firmware_job_state(rms::FirmwareJobState::Running as i32),
             FirmwareState::InProgress,
         );
     }
@@ -761,7 +858,7 @@ mod tests {
     #[test]
     fn firmware_job_state_completed() {
         assert_eq!(
-            map_rms_firmware_job_state(rms::FirmwareJobState::FwJobCompleted as i32),
+            map_rms_firmware_job_state(rms::FirmwareJobState::Completed as i32),
             FirmwareState::Completed,
         );
     }
@@ -769,7 +866,7 @@ mod tests {
     #[test]
     fn firmware_job_state_failed() {
         assert_eq!(
-            map_rms_firmware_job_state(rms::FirmwareJobState::FwJobFailed as i32),
+            map_rms_firmware_job_state(rms::FirmwareJobState::Failed as i32),
             FirmwareState::Failed,
         );
     }
@@ -849,10 +946,14 @@ mod tests {
     #[carbide_macros::sqlx_test]
     async fn ps_power_control_success(pool: sqlx::PgPool) {
         let (mock, backend, rack_id, ps1, ps2, _, _) = make_backend(&pool).await;
-        mock.enqueue_set_power_state(Ok(MockRmsApi::power_ok()))
-            .await;
-        mock.enqueue_set_power_state(Ok(MockRmsApi::power_ok()))
-            .await;
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
+            &ps1.to_string(),
+        )))
+        .await;
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
+            &ps2.to_string(),
+        )))
+        .await;
 
         let eps = vec![make_ps_endpoint(PS_MAC_1), make_ps_endpoint(PS_MAC_2)];
         let results = PowerShelfManager::power_control(&backend, &eps, PowerAction::On)
@@ -863,21 +964,31 @@ mod tests {
         assert!(results[0].success);
         assert!(results[1].success);
 
-        let calls = mock.set_power_state_calls().await;
+        let calls = mock.batch_set_power_state_calls().await;
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].node_id, ps1.to_string());
-        assert_eq!(calls[0].rack_id, rack_id.to_string());
-        assert_eq!(calls[0].operation, rms::PowerOperation::PowerOn as i32);
-        assert_eq!(calls[1].node_id, ps2.to_string());
+        assert_eq!(calls[0].operation, rms::PowerOperation::On as i32);
+        let dev0 = &calls[0].nodes.as_ref().unwrap().nodes[0];
+        assert_eq!(dev0.node_id, ps1.to_string());
+        assert_eq!(dev0.rack_id, rack_id.to_string());
+        assert_eq!(dev0.r#type, Some(rms::NodeType::Powershelf as i32));
+        assert!(dev0.bmc_endpoint.is_some());
+        assert!(dev0.host_endpoint.is_none());
+        let dev1 = &calls[1].nodes.as_ref().unwrap().nodes[0];
+        assert_eq!(dev1.node_id, ps2.to_string());
     }
 
     #[carbide_macros::sqlx_test]
     async fn ps_power_control_partial_failure(pool: sqlx::PgPool) {
-        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
-        mock.enqueue_set_power_state(Ok(MockRmsApi::power_ok()))
-            .await;
-        mock.enqueue_set_power_state(Ok(MockRmsApi::power_fail()))
-            .await;
+        let (mock, backend, _, ps1, ps2, _, _) = make_backend(&pool).await;
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
+            &ps1.to_string(),
+        )))
+        .await;
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_fail(
+            &ps2.to_string(),
+            "rms reported failure",
+        )))
+        .await;
 
         let eps = vec![make_ps_endpoint(PS_MAC_1), make_ps_endpoint(PS_MAC_2)];
         let results = PowerShelfManager::power_control(&backend, &eps, PowerAction::On)
@@ -891,10 +1002,12 @@ mod tests {
 
     #[carbide_macros::sqlx_test]
     async fn ps_power_control_transport_error(pool: sqlx::PgPool) {
-        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
-        mock.enqueue_set_power_state(Ok(MockRmsApi::power_ok()))
-            .await;
-        mock.enqueue_set_power_state(Err(librms::RackManagerError::ApiInvocationError(
+        let (mock, backend, _, ps1, _, _, _) = make_backend(&pool).await;
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
+            &ps1.to_string(),
+        )))
+        .await;
+        mock.enqueue_batch_set_power_state(Err(librms::RackManagerError::ApiInvocationError(
             tonic::Status::unavailable("connection refused"),
         )))
         .await;
@@ -917,9 +1030,11 @@ mod tests {
 
     #[carbide_macros::sqlx_test]
     async fn ps_power_control_unknown_mac(pool: sqlx::PgPool) {
-        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
-        mock.enqueue_set_power_state(Ok(MockRmsApi::power_ok()))
-            .await;
+        let (mock, backend, _, _, ps2, _, _) = make_backend(&pool).await;
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
+            &ps2.to_string(),
+        )))
+        .await;
 
         let eps = vec![make_ps_endpoint(UNKNOWN_MAC), make_ps_endpoint(PS_MAC_2)];
         let results =
@@ -930,17 +1045,17 @@ mod tests {
         assert!(!results[0].success);
         assert!(results[1].success);
 
-        let calls = mock.set_power_state_calls().await;
+        let calls = mock.batch_set_power_state_calls().await;
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].operation, rms::PowerOperation::PowerOff as i32);
+        assert_eq!(calls[0].operation, rms::PowerOperation::Off as i32);
     }
 
     #[carbide_macros::sqlx_test]
     async fn ps_update_firmware_success(pool: sqlx::PgPool) {
         let (mock, backend, rack_id, ps1, _ps2, _, _) = make_backend(&pool).await;
-        mock.enqueue_update_node_firmware_async(Ok(MockRmsApi::firmware_update_ok("job-aaa")))
+        mock.enqueue_update_firmware(Ok(MockRmsApi::firmware_update_ok("job-aaa")))
             .await;
-        mock.enqueue_update_node_firmware_async(Ok(MockRmsApi::firmware_update_ok("job-bbb")))
+        mock.enqueue_update_firmware(Ok(MockRmsApi::firmware_update_ok("job-bbb")))
             .await;
 
         let eps = vec![make_ps_endpoint(PS_MAC_1), make_ps_endpoint(PS_MAC_2)];
@@ -952,7 +1067,7 @@ mod tests {
         assert!(results[0].success);
         assert!(results[1].success);
 
-        let calls = mock.update_node_firmware_async_calls().await;
+        let calls = mock.update_firmware_calls().await;
         assert_eq!(calls[0].firmware_targets[0].target, "pmc");
         assert_eq!(calls[0].node_id, ps1.to_string());
         assert_eq!(calls[0].rack_id, rack_id.to_string());
@@ -971,7 +1086,7 @@ mod tests {
     #[carbide_macros::sqlx_test]
     async fn ps_update_firmware_multiple_components(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
-        mock.enqueue_update_node_firmware_async(Ok(MockRmsApi::firmware_update_ok("job-1")))
+        mock.enqueue_update_firmware(Ok(MockRmsApi::firmware_update_ok("job-1")))
             .await;
 
         let eps = vec![make_ps_endpoint(PS_MAC_1)];
@@ -986,7 +1101,7 @@ mod tests {
 
         assert!(results[0].success);
 
-        let calls = mock.update_node_firmware_async_calls().await;
+        let calls = mock.update_firmware_calls().await;
         assert_eq!(calls[0].firmware_targets.len(), 2);
         assert_eq!(calls[0].firmware_targets[0].target, "pmc");
         assert_eq!(calls[0].firmware_targets[1].target, "psu");
@@ -995,10 +1110,8 @@ mod tests {
     #[carbide_macros::sqlx_test]
     async fn ps_update_firmware_failure(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
-        mock.enqueue_update_node_firmware_async(Ok(MockRmsApi::firmware_update_fail(
-            "bad firmware file",
-        )))
-        .await;
+        mock.enqueue_update_firmware(Ok(MockRmsApi::firmware_update_fail("bad firmware file")))
+            .await;
 
         let eps = vec![make_ps_endpoint(PS_MAC_1)];
         let results = backend
@@ -1014,7 +1127,7 @@ mod tests {
     async fn ps_firmware_status_running(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
 
-        mock.enqueue_update_node_firmware_async(Ok(MockRmsApi::firmware_update_ok("job-xyz")))
+        mock.enqueue_update_firmware(Ok(MockRmsApi::firmware_update_ok("job-xyz")))
             .await;
         let eps = vec![make_ps_endpoint(PS_MAC_1)];
         backend
@@ -1023,7 +1136,7 @@ mod tests {
             .unwrap();
 
         mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-            rms::FirmwareJobState::FwJobRunning,
+            rms::FirmwareJobState::Running,
         )))
         .await;
 
@@ -1061,7 +1174,7 @@ mod tests {
     async fn ps_firmware_status_completed(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
 
-        mock.enqueue_update_node_firmware_async(Ok(MockRmsApi::firmware_update_ok("job-done")))
+        mock.enqueue_update_firmware(Ok(MockRmsApi::firmware_update_ok("job-done")))
             .await;
         let eps = vec![make_ps_endpoint(PS_MAC_1)];
         backend
@@ -1070,7 +1183,7 @@ mod tests {
             .unwrap();
 
         mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-            rms::FirmwareJobState::FwJobCompleted,
+            rms::FirmwareJobState::Completed,
         )))
         .await;
 
@@ -1084,7 +1197,7 @@ mod tests {
     async fn ps_firmware_status_failed(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
 
-        mock.enqueue_update_node_firmware_async(Ok(MockRmsApi::firmware_update_ok("job-fail")))
+        mock.enqueue_update_firmware(Ok(MockRmsApi::firmware_update_ok("job-fail")))
             .await;
         let eps = vec![make_ps_endpoint(PS_MAC_1)];
         backend
@@ -1094,7 +1207,7 @@ mod tests {
 
         mock.enqueue_get_firmware_job_status(Ok(rms::GetFirmwareJobStatusResponse {
             status: rms::ReturnCode::Success as i32,
-            job_state: rms::FirmwareJobState::FwJobFailed as i32,
+            job_state: rms::FirmwareJobState::Failed as i32,
             error_message: "checksum mismatch".into(),
             ..Default::default()
         }))
@@ -1174,10 +1287,14 @@ mod tests {
     #[carbide_macros::sqlx_test]
     async fn sw_power_control_success(pool: sqlx::PgPool) {
         let (mock, backend, rack_id, _, _, sw1, sw2) = make_backend(&pool).await;
-        mock.enqueue_set_power_state(Ok(MockRmsApi::power_ok()))
-            .await;
-        mock.enqueue_set_power_state(Ok(MockRmsApi::power_ok()))
-            .await;
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
+            &sw1.to_string(),
+        )))
+        .await;
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
+            &sw2.to_string(),
+        )))
+        .await;
 
         let eps = vec![make_sw_endpoint(SW_MAC_1), make_sw_endpoint(SW_MAC_2)];
         let results = NvSwitchManager::power_control(&backend, &eps, PowerAction::On)
@@ -1188,18 +1305,25 @@ mod tests {
         assert!(results[0].success);
         assert!(results[1].success);
 
-        let calls = mock.set_power_state_calls().await;
-        assert_eq!(calls[0].node_id, sw1.to_string());
-        assert_eq!(calls[0].rack_id, rack_id.to_string());
-        assert_eq!(calls[0].operation, rms::PowerOperation::PowerOn as i32);
-        assert_eq!(calls[1].node_id, sw2.to_string());
+        let calls = mock.batch_set_power_state_calls().await;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].operation, rms::PowerOperation::On as i32);
+        let dev0 = &calls[0].nodes.as_ref().unwrap().nodes[0];
+        assert_eq!(dev0.node_id, sw1.to_string());
+        assert_eq!(dev0.rack_id, rack_id.to_string());
+        assert_eq!(dev0.r#type, Some(rms::NodeType::Switch as i32));
+        assert!(dev0.bmc_endpoint.is_some());
+        let dev1 = &calls[1].nodes.as_ref().unwrap().nodes[0];
+        assert_eq!(dev1.node_id, sw2.to_string());
     }
 
     #[carbide_macros::sqlx_test]
     async fn sw_power_control_unknown_mac(pool: sqlx::PgPool) {
-        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
-        mock.enqueue_set_power_state(Ok(MockRmsApi::power_ok()))
-            .await;
+        let (mock, backend, _, _, _, _, sw2) = make_backend(&pool).await;
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
+            &sw2.to_string(),
+        )))
+        .await;
 
         let eps = vec![make_sw_endpoint(UNKNOWN_MAC), make_sw_endpoint(SW_MAC_2)];
         let results = NvSwitchManager::power_control(&backend, &eps, PowerAction::ForceOff)
@@ -1209,14 +1333,15 @@ mod tests {
         assert!(!results[0].success);
         assert!(results[1].success);
 
-        let calls = mock.set_power_state_calls().await;
+        let calls = mock.batch_set_power_state_calls().await;
         assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].operation, rms::PowerOperation::Off as i32);
     }
 
     #[carbide_macros::sqlx_test]
     async fn sw_queue_firmware_updates_success(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
-        mock.enqueue_update_node_firmware_async(Ok(MockRmsApi::firmware_update_ok("sw-job-1")))
+        mock.enqueue_update_firmware(Ok(MockRmsApi::firmware_update_ok("sw-job-1")))
             .await;
 
         let eps = vec![make_sw_endpoint(SW_MAC_1)];
@@ -1231,7 +1356,7 @@ mod tests {
 
         assert!(results[0].success);
 
-        let calls = mock.update_node_firmware_async_calls().await;
+        let calls = mock.update_firmware_calls().await;
         assert_eq!(calls[0].firmware_targets[0].target, "bmc");
         assert_eq!(calls[0].firmware_targets[1].target, "bios");
         assert_eq!(calls[0].node_id, sw1.to_string());
@@ -1247,7 +1372,7 @@ mod tests {
     async fn sw_firmware_status(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
 
-        mock.enqueue_update_node_firmware_async(Ok(MockRmsApi::firmware_update_ok("sw-job-2")))
+        mock.enqueue_update_firmware(Ok(MockRmsApi::firmware_update_ok("sw-job-2")))
             .await;
         let eps = vec![make_sw_endpoint(SW_MAC_1)];
         backend
@@ -1256,7 +1381,7 @@ mod tests {
             .unwrap();
 
         mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-            rms::FirmwareJobState::FwJobCompleted,
+            rms::FirmwareJobState::Completed,
         )))
         .await;
 

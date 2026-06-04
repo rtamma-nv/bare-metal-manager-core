@@ -22,7 +22,9 @@ use db::{ObjectColumnFilter, Transaction};
 use forge_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
+use itertools::Itertools;
 use librms::RmsApi;
+use mac_address::MacAddress;
 use model::bmc_info::BmcInfo;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::hardware_info::HardwareInfo;
@@ -148,12 +150,6 @@ impl MachineCreator {
 
         // Zero-dpu case: If the explored host had no DPUs, we can create the machine now
         if managed_host.explored_host.dpus.is_empty() {
-            if !self.config.allow_zero_dpu_hosts {
-                let error =
-                    SiteExplorerError::NoDpusInMachine(managed_host.explored_host.host_bmc_ip);
-                tracing::error!(%error, "Cannot create managed host for explored endpoint with no DPUs: Zero-dpu hosts are disallowed by config");
-                return Err(error);
-            }
             if let Some(machine_id) = self
                 .create_zero_dpu_machine(&mut txn, &managed_host, report, machine_data)
                 .await?
@@ -250,13 +246,13 @@ impl MachineCreator {
         if let (Some(rack_id), Some(rms_client)) =
             (&expected_machine.data.rack_id, &self.rms_client)
         {
-            let request = librms::protos::rack_manager::GetDeviceInfoByDeviceListRequest {
+            let request = librms::protos::rack_manager::BatchGetNodeDeviceInfoRequest {
                 nodes: Some(librms::protos::rack_manager::NodeSet {
-                    devices: vec![librms::protos::rack_manager::NewNodeInfo {
+                    nodes: vec![librms::protos::rack_manager::NodeInfo {
                         node_id: host_machine_id.to_string(),
                         rack_id: rack_id.to_string(),
                         r#type: Some(librms::protos::rack_manager::NodeType::Compute as i32),
-                        bmc_endpoint: Some(librms::protos::rack_manager::BmcEndpoint {
+                        bmc_endpoint: Some(librms::protos::rack_manager::Endpoint {
                             interface: Some(librms::protos::rack_manager::NetworkInterface {
                                 ip_address: explored_host.host_bmc_ip.to_string(),
                                 mac_address: expected_machine.bmc_mac_address.to_string(),
@@ -274,11 +270,11 @@ impl MachineCreator {
                                     ),
                                 }
                             }),
+                            dangerously_accept_invalid_certs: true,
                         }),
                         ..Default::default()
                     }],
                 }),
-                ..Default::default()
             };
             let (slot_number, tray_index) =
                 crate::fetch_slot_and_tray(rms_client.as_ref(), request).await;
@@ -314,7 +310,7 @@ impl MachineCreator {
         // If there's already a machine with the same MAC address as this endpoint, return false. We
         // can't rely on matching the machine_id, as it may have migrated to a stable MachineID
         // already.
-        let mac_addresses = report.all_mac_addresses();
+        let mac_addresses = host_mac_addresses_for_predicted_machine(report, machine_data);
         for mac_address in &mac_addresses {
             if db::machine::find_by_mac_address(txn, mac_address)
                 .await?
@@ -808,5 +804,34 @@ impl MachineCreator {
         .await?;
 
         Ok(predicted_machine_id)
+    }
+}
+
+/// Host inband MACs used when minting `predicted_machine_interface` rows for zero-DPU hosts.
+/// Prefers Redfish-reported System EthernetInterfaces; falls back to `ExpectedMachine.host_nics`
+/// when the BMC omits them from Redfish.
+fn host_mac_addresses_for_predicted_machine(
+    report: &EndpointExplorationReport,
+    machine_data: Option<&ExpectedMachineData>,
+) -> Vec<MacAddress> {
+    let from_redfish = report.all_mac_addresses();
+    match from_redfish.as_slice() {
+        [_, ..] => from_redfish,
+        [] => machine_data
+            .filter(|_| !(report.is_dpu() || report.is_switch() || report.is_power_shelf()))
+            .map(|data| data.host_nics.as_slice())
+            .filter(|host_nics| !host_nics.is_empty())
+            .map(|host_nics| {
+                tracing::info!(
+                    host_nic_count = host_nics.len(),
+                    "System EthernetInterfaces missing from Redfish; using ExpectedMachine.host_nics for predicted machine interfaces"
+                );
+                host_nics
+                    .iter()
+                    .map(|nic| nic.mac_address)
+                    .dedup()
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }

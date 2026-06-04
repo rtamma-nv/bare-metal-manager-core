@@ -1,19 +1,5 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 package util
 
@@ -286,7 +272,7 @@ func TestBuildSubnet(t *testing.T, dbSession *cdb.Session, tenant *cdbm.Tenant, 
 }
 
 // TestBuildInfiniBandPartition builds and returns an InfiniBandPartition
-func TestBuildInfiniBandPartition(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, tenant *cdbm.Tenant, controllerIBPartitionID *uuid.UUID, status string, isMissingOnSite bool) *cdbm.InfiniBandPartition {
+func TestBuildInfiniBandPartition(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, tenant *cdbm.Tenant, controllerIBPartitionID *uuid.UUID, status cdbm.InfiniBandPartitionStatus, isMissingOnSite bool) *cdbm.InfiniBandPartition {
 	ibp := &cdbm.InfiniBandPartition{
 		ID:                      uuid.New(),
 		Name:                    name,
@@ -305,7 +291,7 @@ func TestBuildInfiniBandPartition(t *testing.T, dbSession *cdb.Session, name str
 }
 
 // TestBuildNVLinkLogicalPartition builds and returns an NVLinkLogicalPartition
-func TestBuildNVLinkLogicalPartition(t *testing.T, dbSession *cdb.Session, name string, description *string, site *cdbm.Site, tenant *cdbm.Tenant, status string, isMissingOnSite bool) *cdbm.NVLinkLogicalPartition {
+func TestBuildNVLinkLogicalPartition(t *testing.T, dbSession *cdb.Session, name string, description *string, site *cdbm.Site, tenant *cdbm.Tenant, status cdbm.NVLinkLogicalPartitionStatus, isMissingOnSite bool) *cdbm.NVLinkLogicalPartition {
 	nvllp := &cdbm.NVLinkLogicalPartition{
 		ID:              uuid.New(),
 		Name:            name,

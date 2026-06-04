@@ -49,6 +49,7 @@ carbide-utils = { path = "../utils" }
 chrono = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
+clap_mangen = { workspace = true }
 color-eyre = { workspace = true }
 csv = { workspace = true }
 eyre = { workspace = true }
@@ -68,8 +69,8 @@ toml = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { features = [
-    "env-filter",
-    "local-time",
+  "env-filter",
+  "local-time",
 ], workspace = true }
 urlencoding = { workspace = true }
 uuid = { workspace = true }

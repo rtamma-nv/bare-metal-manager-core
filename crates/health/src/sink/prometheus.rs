@@ -34,11 +34,10 @@ impl PrometheusSink {
         metrics_manager: Arc<MetricsManager>,
         metrics_prefix: &str,
     ) -> Result<Self, HealthError> {
-        let collector_registry =
-            Arc::new(metrics_manager.create_collector_registry(
-                "sink_prometheus_collector".to_string(),
-                metrics_prefix,
-            )?);
+        let collector_registry = Arc::new(metrics_manager.create_telemetry_collector_registry(
+            "sink_prometheus_collector".to_string(),
+            metrics_prefix,
+        )?);
         Ok(Self {
             collector_registry,
             stream_metrics: DashMap::new(),
@@ -241,7 +240,7 @@ mod tests {
     use mac_address::MacAddress;
 
     use super::*;
-    use crate::endpoint::{BmcAddr, EndpointMetadata, MachineData, SwitchData};
+    use crate::endpoint::{BmcAddr, EndpointMetadata, MachineData, SwitchData, SwitchEndpointRole};
 
     fn test_switch_id(label: &str) -> SwitchId {
         let mut hash = [0u8; 32];
@@ -309,6 +308,9 @@ mod tests {
                 serial: "SN-SWITCH-001".to_string(),
                 slot_number: Some(7),
                 tray_index: Some(3),
+                endpoint_role: SwitchEndpointRole::Host,
+                is_primary: false,
+                nmxt_enabled: false,
             })),
             rack_id: None,
         };

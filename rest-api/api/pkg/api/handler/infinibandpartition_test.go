@@ -1,19 +1,5 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 package handler
 
@@ -72,9 +58,9 @@ func testBuildAllocation(t *testing.T, dbSession *cdb.Session, st *cdbm.Site, tn
 	return al
 }
 
-func testBuildIBPartition(t *testing.T, dbSession *cdb.Session, name string, org string, site *cdbm.Site, tenant *cdbm.Tenant, controllerIBPartionID *uuid.UUID, status *string, isMissingOnSite bool) *cdbm.InfiniBandPartition {
+func testBuildIBPartition(t *testing.T, dbSession *cdb.Session, name string, org string, site *cdbm.Site, tenant *cdbm.Tenant, controllerIBPartionID *uuid.UUID, status *cdbm.InfiniBandPartitionStatus, isMissingOnSite bool) *cdbm.InfiniBandPartition {
 	if status == nil {
-		status = cdb.GetStrPtr(cdbm.InfiniBandPartitionStatusReady)
+		status = cdb.Ptr(cdbm.InfiniBandPartitionStatusReady)
 	}
 	ibp := &cdbm.InfiniBandPartition{
 		ID:                      uuid.New(),
@@ -524,8 +510,8 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 			},
 		)
 		assert.Nil(t, err)
-		common.TestBuildStatusDetail(t, dbSession, ipb.ID.String(), cdbm.InfiniBandPartitionStatusPending, cdb.GetStrPtr("request received, pending processing"))
-		common.TestBuildStatusDetail(t, dbSession, ipb.ID.String(), cdbm.InfiniBandPartitionStatusReady, cdb.GetStrPtr("InfiniBand Partition is now ready for use"))
+		common.TestBuildStatusDetail(t, dbSession, ipb.ID.String(), string(cdbm.InfiniBandPartitionStatusPending), cdb.GetStrPtr("request received, pending processing"))
+		common.TestBuildStatusDetail(t, dbSession, ipb.ID.String(), string(cdbm.InfiniBandPartitionStatusReady), cdb.GetStrPtr("InfiniBand Partition is now ready for use"))
 		ibps = append(ibps, *ipb)
 	}
 
@@ -720,7 +706,7 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 			reqOrgName:     tnOrg1,
 			user:           tnu1,
 			querySiteID:    cdb.GetStrPtr(site1.ID.String()),
-			queryStatus:    cdb.GetStrPtr(cdbm.InfiniBandPartitionStatusPending),
+			queryStatus:    cdb.GetTypedStrPtr(cdbm.InfiniBandPartitionStatusPending),
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
 			expectedCnt:    paginator.DefaultLimit,

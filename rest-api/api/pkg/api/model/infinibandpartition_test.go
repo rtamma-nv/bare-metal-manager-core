@@ -1,24 +1,11 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 package model
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +13,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller-rest/db/pkg/db/model"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAPIInfiniBandPartitionCreateRequest_Validate(t *testing.T) {
@@ -49,6 +37,11 @@ func TestAPIInfiniBandPartitionCreateRequest_Validate(t *testing.T) {
 			obj:       APIInfiniBandPartitionCreateRequest{Name: "test"},
 			expectErr: true,
 		},
+		{
+			desc:      "error when description is too long",
+			obj:       APIInfiniBandPartitionCreateRequest{Name: "test", Description: cdb.GetStrPtr(strings.Repeat("x", 1025)), SiteID: uuid.New().String()},
+			expectErr: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
@@ -59,6 +52,33 @@ func TestAPIInfiniBandPartitionCreateRequest_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAPIInfiniBandPartitionCreateRequest_ToProto(t *testing.T) {
+	id := uuid.New()
+	desc := "primary"
+	ibp := &cdbm.InfiniBandPartition{
+		ID:          id,
+		Org:         "org-1",
+		Name:        "ibp-a",
+		Description: &desc,
+		Labels:      map[string]string{"env": "prod"},
+	}
+
+	t.Run("builds creation request from the entity proto", func(t *testing.T) {
+		req := APIInfiniBandPartitionCreateRequest{Name: "ibp-a", SiteID: uuid.NewString()}
+		got := req.ToProto(ibp)
+		require.NotNil(t, got)
+		require.NotNil(t, got.Id)
+		assert.Equal(t, id.String(), got.Id.Value)
+		require.NotNil(t, got.Config)
+		assert.Equal(t, "ibp-a", got.Config.Name)
+		assert.Equal(t, "org-1", got.Config.TenantOrganizationId)
+		require.NotNil(t, got.Metadata)
+		assert.Equal(t, "ibp-a", got.Metadata.Name)
+		assert.Equal(t, "primary", got.Metadata.Description)
+		require.Len(t, got.Metadata.Labels, 1)
+	})
 }
 
 func TestAPIInfiniBandPartitionUpdateRequest_Validate(t *testing.T) {
@@ -77,6 +97,11 @@ func TestAPIInfiniBandPartitionUpdateRequest_Validate(t *testing.T) {
 			obj:       APIInfiniBandPartitionUpdateRequest{Name: cdb.GetStrPtr("updatedname"), Description: cdb.GetStrPtr("updated")},
 			expectErr: false,
 		},
+		{
+			desc:      "error when description is too long",
+			obj:       APIInfiniBandPartitionUpdateRequest{Description: cdb.GetStrPtr(strings.Repeat("x", 1025))},
+			expectErr: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
@@ -87,6 +112,33 @@ func TestAPIInfiniBandPartitionUpdateRequest_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAPIInfiniBandPartitionUpdateRequest_ToProto(t *testing.T) {
+	id := uuid.New()
+	desc := "primary"
+	ibp := &cdbm.InfiniBandPartition{
+		ID:          id,
+		Org:         "org-1",
+		Name:        "ibp-a",
+		Description: &desc,
+		Labels:      map[string]string{"env": "prod"},
+	}
+
+	t.Run("builds update request from the entity proto", func(t *testing.T) {
+		req := APIInfiniBandPartitionUpdateRequest{Name: cdb.GetStrPtr("ibp-a")}
+		got := req.ToProto(ibp)
+		require.NotNil(t, got)
+		require.NotNil(t, got.Id)
+		assert.Equal(t, id.String(), got.Id.Value)
+		require.NotNil(t, got.Config)
+		assert.Equal(t, "ibp-a", got.Config.Name)
+		assert.Equal(t, "org-1", got.Config.TenantOrganizationId)
+		require.NotNil(t, got.Metadata)
+		assert.Equal(t, "ibp-a", got.Metadata.Name)
+		assert.Equal(t, "primary", got.Metadata.Description)
+		require.Len(t, got.Metadata.Labels, 1)
+	})
 }
 
 func TestAPIInfiniBandPartitionNew(t *testing.T) {

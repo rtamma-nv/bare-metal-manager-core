@@ -1,19 +1,5 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 package cmd
 
@@ -22,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,15 +21,33 @@ import (
 	"github.com/NVIDIA/infra-controller-rest/flow/internal/config"
 	"github.com/NVIDIA/infra-controller-rest/flow/internal/nicoapi"
 	svc "github.com/NVIDIA/infra-controller-rest/flow/internal/service"
+	"github.com/NVIDIA/infra-controller-rest/flow/internal/task/componentmanager"
 	cmbuiltin "github.com/NVIDIA/infra-controller-rest/flow/internal/task/componentmanager/builtin"
 	cmconfig "github.com/NVIDIA/infra-controller-rest/flow/internal/task/componentmanager/config"
 	temporalmanager "github.com/NVIDIA/infra-controller-rest/flow/internal/task/executor/temporalworkflow/manager"
 	pkgcerts "github.com/NVIDIA/infra-controller-rest/flow/pkg/certs"
+	"github.com/NVIDIA/infra-controller-rest/flow/pkg/common/devicetypes"
 )
 
 const (
 	defaultServicePort    = 50051
 	componentMgrCfgEnvVar = "COMPONENT_MANAGER_CONFIG"
+
+	// computeImplEnvVar selects the compute component manager
+	// implementation at deploy time. This override exists for the
+	// migration from the legacy machine-centric NICo RPCs ("nicolegacy")
+	// to Core's Component Manager dispatch ("nico"). The value must be a
+	// compute implementation name registered in the catalog (currently
+	// "nico", "nicolegacy", or "mock"). When the variable is unset or
+	// empty the embedded service config selection is used.
+	//
+	// The name mirrors COMPONENT_MANAGER_CONFIG above: a future per-type
+	// override for nvswitch / powershelf would simply add
+	// COMPONENT_MANAGER_NVSWITCH / COMPONENT_MANAGER_POWERSHELF.
+	//
+	// TODO: remove this override and the compute/nicolegacy package once
+	// every Flow deployment runs on the Component Manager path.
+	computeImplEnvVar = "COMPONENT_MANAGER_COMPUTE"
 )
 
 var (
@@ -99,8 +104,14 @@ func init() {
 //     Used when no config file is provided. The primary production path.
 //     Uses the component manager implementation map defined by builtin.
 //
+// After the base config is selected, COMPONENT_MANAGER_COMPUTE (if
+// set) overrides the compute component manager selection. This narrow
+// override exists so deployments can flip between the legacy and the
+// new Component Manager-based compute implementations without shipping
+// a separate config file. See computeImplEnvVar.
+//
 // The config specifies:
-//   - Which component manager implementations to use (nico, psm, mock)
+//   - Which component manager implementations to use (nico, nicolegacy, mock)
 //   - Provider settings (timeouts, endpoints)
 func loadComponentManagerConfig() (cmconfig.Config, error) {
 	// Priority 1: CLI flag
@@ -111,15 +122,49 @@ func loadComponentManagerConfig() (cmconfig.Config, error) {
 		configPath = os.Getenv(componentMgrCfgEnvVar)
 	}
 
-	// Load from file if a path was specified
+	var (
+		cfg cmconfig.Config
+		err error
+	)
 	if configPath != "" {
 		log.Info().Str("config_path", configPath).Msg("Loading component manager config from file")
-		return cmbuiltin.LoadConfig(configPath)
+		cfg, err = cmbuiltin.LoadConfig(configPath)
+	} else {
+		log.Info().Msg("Using embedded component manager service config")
+		cfg, err = cmbuiltin.LoadConfig("")
+	}
+	if err != nil {
+		return cmconfig.Config{}, err
 	}
 
-	// Priority 3: Embedded service config
-	log.Info().Msg("Using embedded component manager service config")
-	return cmbuiltin.LoadConfig("")
+	applyComputeImplementationOverride(&cfg)
+
+	return cfg, nil
+}
+
+// applyComputeImplementationOverride mutates cfg in place to honour the
+// COMPONENT_MANAGER_COMPUTE env var when it is set to a non-empty
+// value. The catalog still validates the resulting selection during
+// registry construction, so an invalid implementation name surfaces as
+// a normal startup failure rather than being silently ignored.
+func applyComputeImplementationOverride(cfg *cmconfig.Config) {
+	override := strings.TrimSpace(os.Getenv(computeImplEnvVar))
+	if override == "" {
+		return
+	}
+
+	if cfg.ComponentManagers == nil {
+		cfg.ComponentManagers = map[devicetypes.ComponentType]string{}
+	}
+
+	previous := cfg.ComponentManagers[devicetypes.ComponentTypeCompute]
+	cfg.ComponentManagers[devicetypes.ComponentTypeCompute] = override
+
+	log.Info().
+		Str("env_var", computeImplEnvVar).
+		Str("previous_implementation", previous).
+		Str("implementation", override).
+		Msg("Compute component manager implementation overridden by environment")
 }
 
 // doServe is the main entry point for the serve subcommand. It loads all
@@ -178,6 +223,7 @@ func doServe() {
 	if err != nil {
 		log.Fatal().Msgf("failed to initialize component manager registry: %v", err)
 	}
+	logComponentManagerRegistry(cmRegistry)
 
 	temporalManagerConf := temporalmanager.Config{
 		ClientConf: *temporalConf,
@@ -252,5 +298,26 @@ func doServe() {
 
 	if err := service.Start(ctx); err != nil {
 		log.Fatal().Msgf("failed to start the service: %v\n", err)
+	}
+}
+
+func logComponentManagerRegistry(registry *componentmanager.Registry) {
+	descriptors, err := registry.Descriptors()
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Msg("Component manager registry report unavailable")
+		return
+	}
+
+	for _, descriptor := range descriptors {
+		log.Info().
+			Str(
+				"component_type",
+				devicetypes.ComponentTypeToString(descriptor.Type),
+			).
+			Str("implementation", descriptor.Implementation).
+			Strs("capabilities", descriptor.Capabilities.Strings()).
+			Msg("Active component manager capabilities")
 	}
 }

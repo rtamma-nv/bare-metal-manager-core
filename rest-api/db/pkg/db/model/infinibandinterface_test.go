@@ -1,19 +1,5 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 package model
 
@@ -105,7 +91,7 @@ func TestInfiniBandInterfaceSQLDAO_GetByID(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, i1)
 
-	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn.Org, tn.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.GetStrPtr(InfiniBandPartitionStatusReady), tnu.ID)
+	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn.Org, tn.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.Ptr(InfiniBandPartitionStatusReady), tnu.ID)
 	ibif := testBuildInfiniBandInterface(t, dbSession, nil, st.ID, i1.ID, ibpr.ID, 1, false, nil, nil, false, db.GetStrPtr(InfiniBandInterfaceStatusReady), tnu.ID)
 
 	// OTEL Spanner configuration
@@ -273,8 +259,8 @@ func TestInfiniBandInterface_GetAll(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, i2)
 
-	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn1.Org, tn1.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.GetStrPtr(InfiniBandPartitionStatusReady), tnu1.ID)
-	ibpr2 := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition2", nil, tn2.Org, tn2.ID, st2.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.GetStrPtr(InfiniBandPartitionStatusReady), tnu2.ID)
+	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn1.Org, tn1.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.Ptr(InfiniBandPartitionStatusReady), tnu1.ID)
+	ibpr2 := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition2", nil, tn2.Org, tn2.ID, st2.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.Ptr(InfiniBandPartitionStatusReady), tnu2.ID)
 
 	totalCount := 30
 	infiniBandInterfaces := []InfiniBandInterface{}
@@ -585,7 +571,7 @@ func TestInfiniBandInterfaceSQLDAO_Create(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, i1)
 
-	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn.Org, tn.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.GetStrPtr(InfiniBandPartitionStatusReady), tnu.ID)
+	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn.Org, tn.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.Ptr(InfiniBandPartitionStatusReady), tnu.ID)
 
 	ibif := &InfiniBandInterface{
 		SiteID:                st.ID,
@@ -731,12 +717,12 @@ func TestInfiniBandInterfaceSQLDAO_Update(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, i1)
 
-	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn.Org, tn.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.GetStrPtr(InfiniBandPartitionStatusReady), tnu.ID)
+	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn.Org, tn.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.Ptr(InfiniBandPartitionStatusReady), tnu.ID)
 	ibif := testBuildInfiniBandInterface(t, dbSession, nil, st.ID, i1.ID, ibpr.ID, 1, false, nil, nil, false, db.GetStrPtr(InfiniBandInterfaceStatusReady), tnu.ID)
 
 	uInfiniBandInterface := ibif
 	uInfiniBandInterface.VirtualFunctionID = db.GetIntPtr(2)
-	uInfiniBandInterface.Status = InfiniBandPartitionStatusPending
+	uInfiniBandInterface.Status = InfiniBandInterfaceStatusPending
 	uInfiniBandInterface.IsMissingOnSite = true
 
 	// OTEL Spanner configuration
@@ -862,7 +848,7 @@ func TestInfiniBandInterfaceSQLDAO_Clear(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, i1)
 
-	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn.Org, tn.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.GetStrPtr(InfiniBandPartitionStatusReady), tnu.ID)
+	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn.Org, tn.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.Ptr(InfiniBandPartitionStatusReady), tnu.ID)
 	ibif := testBuildInfiniBandInterface(t, dbSession, nil, st.ID, i1.ID, ibpr.ID, 1, false, nil, nil, false, db.GetStrPtr(InfiniBandInterfaceStatusReady), tnu.ID)
 
 	// OTEL Spanner configuration
@@ -992,7 +978,7 @@ func TestInfiniBandInterfaceSQLDAO_Delete(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, i1)
 
-	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn.Org, tn.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.GetStrPtr(InfiniBandPartitionStatusReady), tnu.ID)
+	ibpr := testBuildInfiniBandPartition(t, dbSession, nil, "test-infinibandpartition", nil, tn.Org, tn.ID, st.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.Ptr(InfiniBandPartitionStatusReady), tnu.ID)
 	ibif := testBuildInfiniBandInterface(t, dbSession, nil, st.ID, i1.ID, ibpr.ID, 1, false, nil, nil, false, db.GetStrPtr(InfiniBandInterfaceStatusReady), tnu.ID)
 
 	// OTEL Spanner configuration
@@ -1082,7 +1068,7 @@ func TestInfiniBandInterfaceSQLDAO_CreateMultiple(t *testing.T) {
 	)
 	assert.Nil(t, err)
 
-	ibp := testBuildInfiniBandPartition(t, dbSession, nil, "test-ibpartition", db.GetStrPtr("Test IB Partition"), tn.Org, tn.ID, st.ID, nil, nil, nil, nil, nil, nil, nil, nil, db.GetStrPtr(InfiniBandPartitionStatusReady), tnu.ID)
+	ibp := testBuildInfiniBandPartition(t, dbSession, nil, "test-ibpartition", db.GetStrPtr("Test IB Partition"), tn.Org, tn.ID, st.ID, nil, nil, nil, nil, nil, nil, nil, nil, db.Ptr(InfiniBandPartitionStatusReady), tnu.ID)
 
 	ibisd := NewInfiniBandInterfaceDAO(dbSession)
 
@@ -1246,8 +1232,8 @@ func TestInfiniBandInterfaceSQLDAO_DeleteAllBySiteID(t *testing.T) {
 	inst1 := buildInstanceForSite(st1, "host1.com", "mcType1")
 	inst2 := buildInstanceForSite(st2, "host2.com", "mcType2")
 
-	ibp1 := testBuildInfiniBandPartition(t, dbSession, nil, "ibp-site-1", nil, tn.Org, tn.ID, st1.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.GetStrPtr(InfiniBandPartitionStatusReady), tnu.ID)
-	ibp2 := testBuildInfiniBandPartition(t, dbSession, nil, "ibp-site-2", nil, tn.Org, tn.ID, st2.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.GetStrPtr(InfiniBandPartitionStatusReady), tnu.ID)
+	ibp1 := testBuildInfiniBandPartition(t, dbSession, nil, "ibp-site-1", nil, tn.Org, tn.ID, st1.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.Ptr(InfiniBandPartitionStatusReady), tnu.ID)
+	ibp2 := testBuildInfiniBandPartition(t, dbSession, nil, "ibp-site-2", nil, tn.Org, tn.ID, st2.ID, db.GetUUIDPtr(uuid.New()), nil, nil, nil, nil, nil, nil, nil, db.Ptr(InfiniBandPartitionStatusReady), tnu.ID)
 
 	// Two interfaces in the target site, one in another site that should remain.
 	ibi1a := testBuildInfiniBandInterface(t, dbSession, nil, st1.ID, inst1.ID, ibp1.ID, 1, true, nil, nil, false, db.GetStrPtr(InfiniBandInterfaceStatusReady), tnu.ID)

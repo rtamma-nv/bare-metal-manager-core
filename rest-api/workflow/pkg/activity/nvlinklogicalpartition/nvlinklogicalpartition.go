@@ -1,19 +1,5 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 package nvlinklogicalpartition
 
@@ -121,7 +107,7 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 
 		var name *string
 		var description *string
-		var status *string
+		var status *cdbm.NVLinkLogicalPartitionStatus
 		var statusMessage *string
 
 		// Reset missing flag if necessary
@@ -142,9 +128,12 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 
 		// Update status if necessary
 		if controllerNvllp.Status != nil {
-			status, statusMessage = util.GetNVLinkLogicalPartitionStatus(controllerNvllp.Status.State)
-			if status != nil && *status == nvllp.Status {
-				status = nil
+			var mapped cdbm.NVLinkLogicalPartitionStatus
+			mapped.FromProto(controllerNvllp.Status.State)
+			if mapped != "" && mapped != nvllp.Status {
+				status = &mapped
+				message := mapped.Message()
+				statusMessage = &message
 			}
 		}
 
@@ -170,7 +159,7 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 		}
 
 		if status != nil {
-			_, err = statusDetailDAO.CreateFromParams(ctx, nil, nvllp.ID.String(), *status, statusMessage)
+			_, err = statusDetailDAO.CreateFromParams(ctx, nil, nvllp.ID.String(), string(*status), statusMessage)
 			if err != nil {
 				slogger.Error().Err(err).Msg("failed to create status detail for NVLink Logical Partition in DB")
 				continue
@@ -224,7 +213,7 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 				continue
 			}
 
-			_, _, err = util.UpdateNVLinkLogicalPartitionStatusInDB(ctx, nil, mnlp.dbSession, nvllp.ID, cdb.GetStrPtr(cdbm.NVLinkLogicalPartitionStatusError), cdb.GetStrPtr("NVLink Logical Partition is missing on Site"))
+			_, _, err = util.UpdateNVLinkLogicalPartitionStatusInDB(ctx, nil, mnlp.dbSession, nvllp.ID, cdb.Ptr(cdbm.NVLinkLogicalPartitionStatusError), cdb.GetStrPtr("NVLink Logical Partition is missing on Site"))
 			if err != nil {
 				slogger.Error().Err(err).Msg("failed to update NVLink Logical Partition status detail in DB")
 			}
