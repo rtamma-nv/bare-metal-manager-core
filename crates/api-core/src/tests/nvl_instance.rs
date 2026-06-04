@@ -1498,16 +1498,8 @@ async fn test_create_instance_remove_from_default_partition(pool: sqlx::PgPool) 
         .await
         .unwrap()
         .partition_info_list;
-    assert_eq!(nmxc_partitions.len(), 2);
-    let default_partition = nmxc_partitions
-        .iter()
-        .find(|p| {
-            p.partition_id
-                .as_ref()
-                .is_some_and(|id| id.partition_id == 32766)
-        })
-        .expect("default partition");
-    assert_eq!(default_partition.gpu_uid_list.len(), 8);
+    // only the tenant partition should be present. The default partition should be removed.
+    assert_eq!(nmxc_partitions.len(), 1);
 }
 
 #[crate::sqlx_test]
