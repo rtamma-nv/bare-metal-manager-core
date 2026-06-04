@@ -2601,9 +2601,10 @@ async fn test_instance_delete_with_nvl_config_use_nmxc_simulator(pool: sqlx::PgP
     assert_eq!(ids_all.partition_ids.len(), 0);
 }
 
-
 #[crate::sqlx_test]
-async fn test_managed_host_creation_with_tray_default_partition_use_nmxc_simulator(pool: sqlx::PgPool) {
+async fn test_managed_host_creation_with_tray_default_partition_use_nmxc_simulator(
+    pool: sqlx::PgPool,
+) {
     if !nmxc_simulator_tests_enabled() {
         println!(
             "skipping test_instance_delete_with_nvl_config_use_nmxc_simulator as nmxc simulator tests are not enabled"
@@ -2624,7 +2625,6 @@ async fn test_managed_host_creation_with_tray_default_partition_use_nmxc_simulat
 
     let _segment_id = env.create_vpc_and_tenant_segment().await;
 
-
     let mh = create_managed_host_with_hardware_info_template(
         &env,
         HardwareInfoTemplate::Custom(
@@ -2642,7 +2642,6 @@ async fn test_managed_host_creation_with_tray_default_partition_use_nmxc_simulat
     let gpus: Vec<Gpu> = discovery_info.gpus.to_vec();
 
     println!("{gpus:?}");
-
 
     // Run twice to record observation.
     env.run_nvl_partition_monitor_iteration().await;
