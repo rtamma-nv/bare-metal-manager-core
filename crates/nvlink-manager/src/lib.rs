@@ -1588,13 +1588,6 @@ impl NvlPartitionMonitor {
                         gpus_to_keep,
                     )?;
                 }
-                /*
-                partition_ctx.ensure_gpu_enqueued_into_tray_partition(
-                    &mh.host_snapshot.id,
-                    nvlink_info.domain_uuid,
-                    gpu,
-                )?;
-                */
             }
         }
         Ok(())
