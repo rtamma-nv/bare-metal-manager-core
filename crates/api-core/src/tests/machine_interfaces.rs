@@ -67,6 +67,7 @@ async fn only_one_primary_interface_per_machine(
         &dpu.oob_mac_address,
         true,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await?;
 
@@ -85,6 +86,7 @@ async fn only_one_primary_interface_per_machine(
         &other_dpu.oob_mac_address,
         true,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await?;
 
@@ -120,6 +122,7 @@ async fn many_non_primary_interfaces_per_machine(
         MacAddress::from_str("ff:ff:ff:ff:ff:ff").as_ref().unwrap(),
         true,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await
     .expect("Unable to create machine interface");
@@ -133,6 +136,7 @@ async fn many_non_primary_interfaces_per_machine(
         MacAddress::from_str("ff:ff:ff:ff:ff:ef").as_ref().unwrap(),
         false,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await;
 
@@ -252,6 +256,7 @@ async fn reconcile_admin_addresses_allows_non_dpu_primary_admin_interface(
         &MacAddress::from_str("9a:9b:9c:9d:9e:a1")?,
         true,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await?;
     db::machine_interface::associate_interface_with_machine(
@@ -338,6 +343,7 @@ async fn return_existing_machine_interface_on_rediscover(
         test_mac,
         std::slice::from_ref(&FIXTURE_DHCP_RELAY_ADDRESS.parse().unwrap()),
         None,
+        None,
     )
     .await?;
 
@@ -345,6 +351,7 @@ async fn return_existing_machine_interface_on_rediscover(
         &mut txn,
         test_mac,
         std::slice::from_ref(&FIXTURE_DHCP_RELAY_ADDRESS.parse().unwrap()),
+        None,
         None,
     )
     .await?;
@@ -379,6 +386,7 @@ async fn find_all_interfaces_test_cases(
                 .unwrap(),
             true,
             AddressSelectionStrategy::NextAvailableIp,
+            None,
         )
         .await?;
         db::dhcp_entry::persist(
@@ -454,6 +462,7 @@ async fn find_interfaces_test_cases(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         &dpu.oob_mac_address,
         true,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await?;
 
@@ -536,6 +545,7 @@ async fn create_parallel_mi(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
                 &MacAddress::from_str(&mac).unwrap(),
                 true,
                 AddressSelectionStrategy::NextAvailableIp,
+                None,
             )
             .await
             .unwrap();
@@ -583,6 +593,7 @@ async fn test_find_by_ip_or_id(pool: sqlx::PgPool) -> Result<(), Box<dyn std::er
         MacAddress::from_str("ff:ff:ff:ff:ff:ff").as_ref().unwrap(),
         true,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await
     .unwrap();
@@ -799,7 +810,7 @@ async fn machine_bmc_info_uses_bmc_interface_and_interfaces_exclude_it(
         .addresses
         .first()
         .expect("host BMC interface must have an address")
-        .to_string();
+        .to_owned();
     assert_eq!(host_bmc_interface_mac, host_bmc_mac);
 
     let dpu_bmc_interface = interfaces
@@ -815,7 +826,7 @@ async fn machine_bmc_info_uses_bmc_interface_and_interfaces_exclude_it(
         .addresses
         .first()
         .expect("DPU BMC interface must have an address")
-        .to_string();
+        .to_owned();
     assert_eq!(dpu_bmc_interface_mac, dpu_bmc_mac);
 
     assert_eq!(
@@ -823,10 +834,7 @@ async fn machine_bmc_info_uses_bmc_interface_and_interfaces_exclude_it(
         Some(host_bmc_interface_id)
     );
     assert_eq!(host_machine.bmc_info.mac, Some(host_bmc_interface_mac));
-    assert_eq!(
-        host_machine.bmc_info.ip.as_deref(),
-        Some(host_bmc_interface_ip.as_str())
-    );
+    assert_eq!(host_machine.bmc_info.ip, Some(host_bmc_interface_ip));
     assert!(
         host_machine
             .interfaces
@@ -840,10 +848,7 @@ async fn machine_bmc_info_uses_bmc_interface_and_interfaces_exclude_it(
         Some(dpu_bmc_interface_id)
     );
     assert_eq!(dpu_machine.bmc_info.mac, Some(dpu_bmc_interface_mac));
-    assert_eq!(
-        dpu_machine.bmc_info.ip.as_deref(),
-        Some(dpu_bmc_interface_ip.as_str())
-    );
+    assert_eq!(dpu_machine.bmc_info.ip, Some(dpu_bmc_interface_ip));
     assert!(
         dpu_machine
             .interfaces
@@ -859,6 +864,8 @@ async fn machine_bmc_info_uses_bmc_interface_and_interfaces_exclude_it(
     let rpc_bmc_type = rpc::forge::InterfaceType::Bmc as i32;
     let host_bmc_interface_mac = host_bmc_interface_mac.to_string();
     let dpu_bmc_interface_mac = dpu_bmc_interface_mac.to_string();
+    let host_bmc_interface_ip = host_bmc_interface_ip.to_string();
+    let dpu_bmc_interface_ip = dpu_bmc_interface_ip.to_string();
 
     let host_bmc_info = host_rpc_machine
         .bmc_info
@@ -927,6 +934,7 @@ async fn test_hostname_equals_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::
         MacAddress::from_str("ff:ff:ff:ff:ff:ff").as_ref().unwrap(),
         true,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await
     .unwrap();
@@ -967,6 +975,7 @@ async fn test_max_one_interface_association(
         MacAddress::from_str("ff:ff:ff:ff:ff:ff").as_ref().unwrap(),
         true,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await?;
 
@@ -1047,6 +1056,7 @@ async fn test_power_shelf_association(
         MacAddress::from_str("ff:ff:ff:ff:ff:ff").as_ref().unwrap(),
         true,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await?;
 
@@ -1100,6 +1110,7 @@ async fn test_switch_association(pool: sqlx::PgPool) -> Result<(), Box<dyn std::
         MacAddress::from_str("ff:ff:ff:ff:ff:ff").as_ref().unwrap(),
         true,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await?;
 
@@ -1151,6 +1162,7 @@ async fn test_static_create_returns_address_already_in_use(
         existing_mac,
         std::slice::from_ref(&relay),
         None,
+        None,
     )
     .await?;
     let target_ip = existing_interface.addresses[0];
@@ -1166,6 +1178,7 @@ async fn test_static_create_returns_address_already_in_use(
         &new_mac,
         true,
         AddressSelectionStrategy::StaticAddress(target_ip),
+        None,
     )
     .await;
     assert!(
@@ -1206,6 +1219,7 @@ async fn test_static_create_is_noop_when_same_mac_already_owns_address(
         &mac,
         true,
         AddressSelectionStrategy::StaticAddress(static_ip),
+        None,
     )
     .await?;
     txn.commit().await?;
@@ -1219,6 +1233,7 @@ async fn test_static_create_is_noop_when_same_mac_already_owns_address(
         &mac,
         true,
         AddressSelectionStrategy::StaticAddress(static_ip),
+        None,
     )
     .await?;
     txn.commit().await?;

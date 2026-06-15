@@ -22,9 +22,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use carbide_secrets::credentials::CredentialReader;
+use carbide_secrets::test_support::credentials::TestCredentialManager;
 use chrono::Utc;
-use forge_secrets::credentials::CredentialReader;
-use forge_secrets::test_support::credentials::TestCredentialManager;
 use libredfish::model::certificate::Certificate;
 use libredfish::model::component_integrity::{ComponentIntegrities, ComponentIntegrity};
 use libredfish::model::oem::nvidia_dpu::{HostPrivilegeLevel, NicMode};
@@ -57,6 +57,11 @@ struct RedfishSimState {
     machine_setup_bios_job_id: Option<String>,
     is_bios_setup: Option<bool>,
     job_state_sequence: VecDeque<JobState>,
+    /// Offset (in seconds) applied to the BMC `DateTime` returned by
+    /// `get_manager`, relative to the controller's `Utc::now()`. Defaults to 0
+    /// (perfectly in sync); tests set it to simulate a BMC clock that is out of
+    /// sync to exercise the time-sync reset/retry path.
+    bmc_time_offset_seconds: i64,
     /// Records every call to `RedfishClientPool::create_client` so tests can
     /// assert what vendor was passed at each call site.
     create_client_calls: Vec<CreateClientCall>,
@@ -152,6 +157,13 @@ impl RedfishSim {
         self.state.lock().unwrap().is_bios_setup = Some(ready);
     }
 
+    /// Set the offset (in seconds) applied to the BMC `DateTime` returned by
+    /// `get_manager`, relative to the controller clock. Use a value larger than
+    /// the time-sync threshold to simulate an out-of-sync BMC clock.
+    pub fn set_bmc_time_offset_seconds(&self, offset: i64) {
+        self.state.lock().unwrap().bmc_time_offset_seconds = offset;
+    }
+
     /// Returns a snapshot of every `create_client` call made through this sim,
     /// in the order they happened. Useful for asserting which vendor was
     /// passed at a given call site.
@@ -189,6 +201,10 @@ pub enum RedfishSimAction {
     SetUtcTimezone,
     MachineSetup {
         oem_manager_profiles: libredfish::BiosProfileVendor,
+        /// The boot interface the setup call targeted (`None` when the caller
+        /// ran setup without one, e.g. DPU setup), letting tests assert which
+        /// NIC boot-device configuration was applied for.
+        boot_interface_mac: Option<String>,
     },
     /// Records a call to `Redfish::is_boot_order_setup`, letting
     /// tests assert that the managed-host state controller actually
@@ -288,7 +304,7 @@ impl Redfish for RedfishSimClient {
 
     fn machine_setup<'a>(
         &'a self,
-        _boot_interface: Option<libredfish::BootInterfaceRef<'a>>,
+        boot_interface: Option<libredfish::BootInterfaceRef<'a>>,
         _bios_profiles: &'a HashMap<
             libredfish::model::service_root::RedfishVendor,
             HashMap<
@@ -310,6 +326,7 @@ impl Redfish for RedfishSimClient {
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             host_state.actions.push(RedfishSimAction::MachineSetup {
                 oem_manager_profiles: oem_manager_profiles.clone(),
+                boot_interface_mac: boot_interface.map(boot_interface_ref_to_string),
             });
             Ok(state.machine_setup_bios_job_id.clone())
         })
@@ -1029,8 +1046,10 @@ impl Redfish for RedfishSimClient {
         }"##,
             )
             .unwrap();
-            // Update the date_time to current time for tests
-            manager.date_time = Some(chrono::Utc::now());
+            // Update the date_time to current time for tests, applying any
+            // configured offset so tests can simulate an out-of-sync BMC clock.
+            let offset = self.state.lock().unwrap().bmc_time_offset_seconds;
+            manager.date_time = Some(chrono::Utc::now() + chrono::Duration::seconds(offset));
             Ok(manager)
         })
     }

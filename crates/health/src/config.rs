@@ -16,7 +16,7 @@
  */
 
 use std::fmt::Debug;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
 
@@ -49,6 +49,10 @@ pub struct Config {
     /// Maximum cache size per BMC, uses etags
     pub cache_size: usize,
 
+    /// Interval between BMC endpoint discovery iterations.
+    #[serde(with = "humantime_serde")]
+    pub endpoint_discovery_interval: Duration,
+
     /// BMC proxy URL
     pub bmc_proxy_url: Option<Url>,
 }
@@ -65,6 +69,7 @@ impl Default for Config {
             shard: 0,
             shards_count: 1,
             cache_size: 100,
+            endpoint_discovery_interval: Duration::from_secs(300),
             bmc_proxy_url: None,
         }
     }
@@ -94,7 +99,7 @@ impl Default for EndpointSourcesConfig {
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StaticBmcEndpoint {
-    pub ip: String,
+    pub ip: IpAddr,
     #[serde(default)]
     pub port: Option<u16>,
     pub mac: String,
@@ -111,7 +116,9 @@ pub struct StaticBmcEndpoint {
 pub struct StaticMachineEndpoint {
     pub id: String,
     pub serial: Option<String>,
+    #[serde(alias = "physical_slot_number")]
     pub slot_number: Option<i32>,
+    #[serde(alias = "compute_tray_index")]
     pub tray_index: Option<i32>,
     pub nvlink_domain_uuid: Option<String>,
 }
@@ -139,7 +146,9 @@ fn default_static_switch_endpoint_role() -> StaticSwitchEndpointRole {
 pub struct StaticSwitchEndpoint {
     pub id: Option<String>,
     pub serial: Option<String>,
+    #[serde(alias = "physical_slot_number")]
     pub slot_number: Option<i32>,
+    #[serde(alias = "compute_tray_index")]
     pub tray_index: Option<i32>,
     #[serde(default = "default_static_switch_endpoint_role")]
     pub endpoint_role: StaticSwitchEndpointRole,
@@ -333,6 +342,13 @@ pub struct HealthReportSinkConfig {
 
     /// Drop reports that contain no successes and no alerts before submitting them.
     pub skip_empty_reports: bool,
+
+    /// Suppress re-sending a success-only health report whose content has not changed
+    /// since the last send, until this interval elapses. Reports that contain any alert
+    /// are always forwarded immediately regardless of this setting.
+    /// Set to null or omit to disable suppression.
+    #[serde(with = "humantime_serde::option", default)]
+    pub suppress_unchanged_interval: Option<Duration>,
 }
 
 impl Default for HealthReportSinkConfig {
@@ -341,6 +357,7 @@ impl Default for HealthReportSinkConfig {
             connection: CarbideApiConnectionConfig::default(),
             workers: 4,
             skip_empty_reports: true,
+            suppress_unchanged_interval: Some(Duration::from_secs(300)),
         }
     }
 }
@@ -433,9 +450,15 @@ pub struct RateLimitConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CollectorsConfig {
+    /// Entity discovery configuration
+    pub discovery: DiscoveryConfig,
+
     /// Sensor collector configuration (if present, sensor collector is enabled)
     #[serde(alias = "health")]
     pub sensors: Configurable<SensorCollectorConfig>,
+
+    /// Entity metrics collector configuration (if present, metrics collector is enabled)
+    pub metrics: Configurable<MetricsCollectorConfig>,
 
     /// Firmware collector configuration (if present, firmware collector is enabled)
     pub firmware: Configurable<FirmwareCollectorConfig>,
@@ -456,12 +479,50 @@ pub struct CollectorsConfig {
 impl Default for CollectorsConfig {
     fn default() -> Self {
         Self {
+            discovery: DiscoveryConfig::default(),
             sensors: Configurable::Enabled(SensorCollectorConfig::default()),
+            metrics: Configurable::Disabled,
             firmware: Configurable::Disabled,
             leak_detector: Configurable::Enabled(LeakDetectorCollectorConfig::default()),
             logs: Configurable::Disabled,
             nmxt: Configurable::Disabled,
             nvue: Configurable::Disabled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiscoveryConfig {
+    #[serde(with = "humantime_serde")]
+    pub refresh_interval: Duration,
+
+    pub discovery_concurrency: usize,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            refresh_interval: Duration::from_secs(300),
+            discovery_concurrency: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetricsCollectorConfig {
+    #[serde(with = "humantime_serde")]
+    pub fetch_interval: Duration,
+
+    pub fetch_concurrency: usize,
+}
+
+impl Default for MetricsCollectorConfig {
+    fn default() -> Self {
+        Self {
+            fetch_interval: Duration::from_secs(120),
+            fetch_concurrency: 4,
         }
     }
 }
@@ -519,14 +580,6 @@ impl Default for RackLeakProcessorConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SensorCollectorConfig {
-    /// Interval between BMC endpoint rediscovery.
-    #[serde(with = "humantime_serde")]
-    pub rediscover_interval: Duration,
-
-    /// Interval between entity state refresh.
-    #[serde(with = "humantime_serde")]
-    pub state_refresh_interval: Duration,
-
     /// Interval between sensor fetch iterations.
     #[serde(with = "humantime_serde")]
     pub sensor_fetch_interval: Duration,
@@ -541,8 +594,6 @@ pub struct SensorCollectorConfig {
 impl Default for SensorCollectorConfig {
     fn default() -> Self {
         Self {
-            rediscover_interval: Duration::from_secs(300),
-            state_refresh_interval: Duration::from_secs(9000),
             sensor_fetch_interval: Duration::from_secs(60),
             sensor_fetch_concurrency: 4,
             include_sensor_thresholds: true,
@@ -826,12 +877,64 @@ impl Default for NmxtCollectorConfig {
 #[serde(default)]
 pub struct NvueCollectorConfig {
     pub rest: Configurable<NvueRestConfig>,
+    pub gnmi: Configurable<NvueGnmiConfig>,
 }
 
 impl Default for NvueCollectorConfig {
     fn default() -> Self {
         Self {
             rest: Configurable::Enabled(NvueRestConfig::default()),
+            gnmi: Configurable::Disabled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NvueGnmiConfig {
+    /// gNMI server port on the switch.
+    pub gnmi_port: u16,
+
+    /// Interval between SAMPLE mode subscription updates.
+    #[serde(with = "humantime_serde")]
+    pub sample_interval: Duration,
+
+    /// Timeout for gRPC connection attempts.
+    #[serde(with = "humantime_serde")]
+    pub request_timeout: Duration,
+
+    /// Enable gNMI ON_CHANGE subscription for live system-event messages.
+    #[serde(alias = "system_events_subscription_enabled", alias = "events_enabled")]
+    pub system_events_enabled: bool,
+
+    /// gNMI SAMPLE subscription paths.
+    pub paths: NvueGnmiPaths,
+}
+
+impl Default for NvueGnmiConfig {
+    fn default() -> Self {
+        Self {
+            gnmi_port: 9339,
+            sample_interval: Duration::from_secs(300),
+            request_timeout: Duration::from_secs(30),
+            system_events_enabled: true,
+            paths: NvueGnmiPaths::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NvueGnmiPaths {
+    pub components_enabled: bool,
+    pub interfaces_enabled: bool,
+}
+
+impl Default for NvueGnmiPaths {
+    fn default() -> Self {
+        Self {
+            components_enabled: true,
+            interfaces_enabled: true,
         }
     }
 }
@@ -948,6 +1051,10 @@ impl Config {
                 "shard ({}) must be less than shards_count ({})",
                 self.shard, self.shards_count
             ));
+        }
+
+        if self.endpoint_discovery_interval.is_zero() {
+            return Err("endpoint_discovery_interval must be greater than 0".to_string());
         }
 
         if let Configurable::Enabled(rate_limit) = &self.rate_limit
@@ -1132,7 +1239,6 @@ mod tests {
         assert!(config.sinks.prometheus.is_enabled());
 
         if let Configurable::Enabled(ref sensors) = config.collectors.sensors {
-            assert_eq!(sensors.rediscover_interval, Duration::from_secs(300));
             assert_eq!(sensors.sensor_fetch_concurrency, 10);
         } else {
             panic!("sensors empty")
@@ -1182,6 +1288,7 @@ mod tests {
         assert_eq!(config.shards_count, 1);
 
         assert_eq!(config.cache_size, 100);
+        assert_eq!(config.endpoint_discovery_interval, Duration::from_secs(300));
 
         if let Configurable::Enabled(ref nvue) = config.collectors.nvue {
             if let Configurable::Enabled(ref rest) = nvue.rest {
@@ -1189,6 +1296,14 @@ mod tests {
                 assert_eq!(rest.request_timeout, Duration::from_secs(30));
             } else {
                 panic!("nvue rest config should be enabled in example config");
+            }
+            if let Configurable::Enabled(ref gnmi) = nvue.gnmi {
+                assert_eq!(gnmi.gnmi_port, 9339);
+                assert_eq!(gnmi.sample_interval, Duration::from_secs(300));
+                assert_eq!(gnmi.request_timeout, Duration::from_secs(30));
+                assert!(gnmi.system_events_enabled);
+            } else {
+                panic!("nvue gnmi config should be enabled in example config");
             }
         } else {
             panic!("nvue config should be enabled in example config");
@@ -1198,6 +1313,8 @@ mod tests {
     #[test]
     fn test_static_only_config() {
         let toml_content = r#"
+endpoint_discovery_interval = "1m"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "192.168.1.100"
 mac = "00:11:22:33:44:55"
@@ -1211,9 +1328,7 @@ enabled = false
 enabled = false
 
 [collectors.sensors]
-rediscover_interval = "1m"
 sensor_fetch_interval = "30s"
-state_refresh_interval = "10m"
 sensor_fetch_concurrency = 5
 include_sensor_thresholds = false
 
@@ -1237,7 +1352,7 @@ cache_size = 50
         assert_eq!(config.endpoint_sources.static_bmc_endpoints.len(), 1);
         assert_eq!(
             config.endpoint_sources.static_bmc_endpoints[0].ip,
-            "192.168.1.100"
+            "192.168.1.100".parse::<IpAddr>().unwrap()
         );
         assert_eq!(
             config.endpoint_sources.static_bmc_endpoints[0].mac,
@@ -1245,6 +1360,7 @@ cache_size = 50
         );
 
         assert_eq!(config.metrics.prefix, "carbide_hardware_new_health");
+        assert_eq!(config.endpoint_discovery_interval, Duration::from_secs(60));
 
         if let Configurable::Enabled(ref rate_limit) = config.rate_limit {
             assert_eq!(rate_limit.bucket_replenish, Duration::from_millis(30));
@@ -1256,7 +1372,6 @@ cache_size = 50
 
         assert!(config.collectors.sensors.is_enabled());
         if let Configurable::Enabled(ref sensors) = config.collectors.sensors {
-            assert_eq!(sensors.rediscover_interval, Duration::from_secs(60));
             assert_eq!(sensors.sensor_fetch_interval, Duration::from_secs(30));
             assert!(!sensors.include_sensor_thresholds);
         } else {
@@ -1272,6 +1387,23 @@ cache_size = 50
     }
 
     #[test]
+    fn test_static_endpoint_config_rejects_invalid_ip() {
+        let toml_content = r#"
+[[endpoint_sources.static_bmc_endpoints]]
+ip = "not-an-ip"
+mac = "00:11:22:33:44:55"
+username = "root"
+"#;
+
+        let result = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(toml_content))
+            .extract::<Config>();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_config_validation() {
         let mut config = Config::default();
 
@@ -1283,6 +1415,11 @@ cache_size = 50
 
         config.shard = 0;
         config.shards_count = 1;
+        assert!(config.validate().is_ok());
+
+        config.endpoint_discovery_interval = Duration::from_secs(0);
+        assert!(config.validate().is_err());
+        config.endpoint_discovery_interval = Duration::from_secs(300);
         assert!(config.validate().is_ok());
 
         config.rate_limit = Configurable::Enabled(RateLimitConfig {
@@ -1567,6 +1704,37 @@ interfaces_enabled = false
     }
 
     #[test]
+    fn test_nvue_gnmi_events_disabled() {
+        let toml_content = r#"
+[endpoint_sources.carbide_api]
+enabled = false
+
+[sinks.health_report]
+enabled = false
+
+[collectors.nvue.gnmi]
+gnmi_port = 9339
+system_events_enabled = false
+"#;
+
+        let config: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(toml_content))
+            .extract()
+            .expect("failed to parse");
+
+        if let Configurable::Enabled(ref nvue) = config.collectors.nvue {
+            if let Configurable::Enabled(ref gnmi) = nvue.gnmi {
+                assert!(!gnmi.system_events_enabled);
+            } else {
+                panic!("gnmi config should be enabled");
+            }
+        } else {
+            panic!("nvue config should be enabled");
+        }
+    }
+
+    #[test]
     fn test_static_endpoint_with_switch_serial() {
         let toml_content = r#"
 [endpoint_sources.carbide_api]
@@ -1770,6 +1938,48 @@ machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
             machine.nvlink_domain_uuid.as_deref(),
             Some("00000000-0000-0000-0000-000000000000")
         );
+    }
+
+    #[test]
+    fn test_static_endpoints_accept_position_field_aliases() {
+        let toml_content = r#"
+[endpoint_sources.carbide_api]
+enabled = false
+
+[[endpoint_sources.static_bmc_endpoints]]
+ip = "10.0.1.2"
+mac = "11:22:33:44:55:11"
+username = "admin"
+password = "pass"
+machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", physical_slot_number = 15, compute_tray_index = 5 }
+
+[[endpoint_sources.static_bmc_endpoints]]
+ip = "10.0.1.1"
+mac = "11:22:33:44:55:66"
+username = "cumulus"
+password = "pass"
+switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 3 }
+"#;
+
+        let config: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(toml_content))
+            .extract()
+            .expect("failed to parse static endpoint config");
+
+        let machine = config.endpoint_sources.static_bmc_endpoints[0]
+            .machine
+            .as_ref()
+            .expect("machine metadata");
+        assert_eq!(machine.slot_number, Some(15));
+        assert_eq!(machine.tray_index, Some(5));
+
+        let switch = config.endpoint_sources.static_bmc_endpoints[1]
+            .switch
+            .as_ref()
+            .expect("switch metadata");
+        assert_eq!(switch.slot_number, Some(7));
+        assert_eq!(switch.tray_index, Some(3));
     }
 
     #[test]

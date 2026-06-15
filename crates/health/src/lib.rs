@@ -16,7 +16,6 @@
  */
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use nv_redfish::bmc_http::reqwest::{
     BmcError, Client as ReqwestClient, ClientParams as ReqwestClientParams,
@@ -87,6 +86,12 @@ pub enum HealthError {
 
     #[error("Redfish SSE not available: {0}")]
     SseNotAvailable(String),
+
+    #[error("gNMI error: {0}")]
+    GnmiError(String),
+
+    #[error("gNMI RPC failed: {0}")]
+    GnmiStatus(tonic::Status),
 }
 
 impl From<String> for HealthError {
@@ -326,15 +331,7 @@ pub async fn run_service(config: Config) -> Result<(), HealthError> {
                     .set(stats.sharded_endpoints as f64);
                 active_endpoints_gauge.set(stats.active_monitors as f64);
 
-                tokio::time::sleep(
-                    config
-                        .collectors
-                        .sensors
-                        .as_option()
-                        .map(|s| s.rediscover_interval)
-                        .unwrap_or(Duration::from_secs(300)),
-                )
-                .await;
+                tokio::time::sleep(config.endpoint_discovery_interval).await;
             }
         }
     });

@@ -138,7 +138,12 @@ func testCommonBuildInfrastructureProvider(t *testing.T, dbSession *cdb.Session,
 func testCommonBuildTenant(t *testing.T, dbSession *cdb.Session, name string, org string, user *cdbm.User) *cdbm.Tenant {
 	tnDAO := cdbm.NewTenantDAO(dbSession)
 
-	tn, err := tnDAO.CreateFromParams(context.Background(), nil, name, cutil.GetPtr("Test Tenant"), org, nil, nil, user)
+	tn, err := tnDAO.Create(context.Background(), nil, cdbm.TenantCreateInput{
+		Name:        name,
+		DisplayName: cutil.GetPtr("Test Tenant"),
+		Org:         org,
+		CreatedBy:   user.ID,
+	})
 	assert.Nil(t, err)
 
 	return tn
@@ -1438,7 +1443,7 @@ func TestGetInstanceTypeAllocationStats(t *testing.T) {
 		it          *cdbm.InstanceType
 		tnas        []cdbm.Allocation
 		instances   []cdbm.Instance
-		expectStats *cam.APIAllocationStats
+		expectStats *cam.APIInstanceTypeAllocationStats
 		expectErr   bool
 		logger      zerolog.Logger
 	}{
@@ -1447,7 +1452,7 @@ func TestGetInstanceTypeAllocationStats(t *testing.T) {
 			tenantID:  cutil.GetPtr(tn1.ID),
 			instances: tn1inss,
 			it:        it1,
-			expectStats: &cam.APIAllocationStats{
+			expectStats: &cam.APIInstanceTypeAllocationStats{
 				Assigned:       len(m1s),
 				Total:          alc1.ConstraintValue,
 				Used:           len(tn1inss),
@@ -1462,7 +1467,7 @@ func TestGetInstanceTypeAllocationStats(t *testing.T) {
 			tenantID:  cutil.GetPtr(tn2.ID),
 			instances: tn2inss,
 			it:        it1,
-			expectStats: &cam.APIAllocationStats{
+			expectStats: &cam.APIInstanceTypeAllocationStats{
 				Assigned:       len(m1s),
 				Total:          alc2.ConstraintValue,
 				Used:           len(tn2inss),
@@ -1477,7 +1482,7 @@ func TestGetInstanceTypeAllocationStats(t *testing.T) {
 			tenantID:  cutil.GetPtr(tn3.ID),
 			instances: tn3inss,
 			it:        it1,
-			expectStats: &cam.APIAllocationStats{
+			expectStats: &cam.APIInstanceTypeAllocationStats{
 				Assigned:       len(m1s),
 				Total:          alc3.ConstraintValue,
 				Used:           len(tn3inss),
@@ -1492,7 +1497,7 @@ func TestGetInstanceTypeAllocationStats(t *testing.T) {
 			tenantID:  nil,
 			instances: it1inss,
 			it:        it1,
-			expectStats: &cam.APIAllocationStats{
+			expectStats: &cam.APIInstanceTypeAllocationStats{
 				Assigned:       len(m1s),
 				Total:          alc1.ConstraintValue + alc2.ConstraintValue + alc3.ConstraintValue,
 				Used:           len(it1inss),
@@ -1507,7 +1512,7 @@ func TestGetInstanceTypeAllocationStats(t *testing.T) {
 			tenantID:  nil,
 			instances: []cdbm.Instance{},
 			it:        it2,
-			expectStats: &cam.APIAllocationStats{
+			expectStats: &cam.APIInstanceTypeAllocationStats{
 				Assigned:       len(m2s),
 				Total:          0,
 				Used:           0,
@@ -2594,4 +2599,26 @@ func TestQueryTagsFor(t *testing.T) {
 	// pointer to struct
 	tags3 := QueryTagsFor(&withTags{})
 	assert.ElementsMatch(t, []string{"alpha", "beta"}, tags3)
+}
+
+// TestGetFlowUUIDPtr locks down the helper used to translate an optional API
+// ID string into Flow's proto UUID wrapper. nil and empty must both round-
+// trip to a nil wrapper so the proto request gets no UUID field and Flow
+// treats the value as unset (e.g. falls back to default rule resolution for
+// ruleId callers).
+func TestGetFlowUUIDPtr(t *testing.T) {
+	t.Run("nil pointer returns nil", func(t *testing.T) {
+		assert.Nil(t, GetFlowUUIDPtr(nil))
+	})
+	t.Run("empty string returns nil", func(t *testing.T) {
+		s := ""
+		assert.Nil(t, GetFlowUUIDPtr(&s))
+	})
+	t.Run("non-empty string wraps into proto UUID", func(t *testing.T) {
+		s := "550e8400-e29b-41d4-a716-446655440000"
+		got := GetFlowUUIDPtr(&s)
+		if assert.NotNil(t, got) {
+			assert.Equal(t, s, got.GetId())
+		}
+	})
 }

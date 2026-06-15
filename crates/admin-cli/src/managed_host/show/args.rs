@@ -20,6 +20,19 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[clap(disable_help_flag = true)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+List all managed hosts:
+    $ nico-admin-cli managed-host show
+
+Show details for one host (by host or DPU machine ID):
+    $ nico-admin-cli managed-host show 12345678-1234-5678-90ab-cdef01234567
+
+Show the summary with IP details:
+    $ nico-admin-cli managed-host show --ips
+
+")]
 pub struct Args {
     #[clap(long, action = clap::ArgAction::HelpLong)]
     help: Option<bool>,

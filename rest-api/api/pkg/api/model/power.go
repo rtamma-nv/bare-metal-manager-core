@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
+	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/flow/protobuf/v1"
 )
@@ -42,6 +43,15 @@ var validPowerControlStatesAny = func() []interface{} {
 type APIUpdatePowerStateRequest struct {
 	SiteID string `json:"siteId"`
 	State  string `json:"state"`
+	// RuleID, when set, overrides the default rule resolution and pins this
+	// operation to the named Operation Rule. Must be a valid UUID belonging
+	// to the same Site and matching the operation's type/code.
+	RuleID *string `json:"ruleId"`
+	// OverrideReadinessCheck, when true, proceeds with the operation even if
+	// one or more target components (or hosts on the owning rack for
+	// rack-scoped components) are reported as not ready by their persisted
+	// status. Intended for operator-supervised maintenance.
+	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
 }
 
 // Validate validates the power control request
@@ -52,6 +62,7 @@ func (r *APIUpdatePowerStateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.In(validPowerControlStatesAny...).Error(
 				fmt.Sprintf("must be one of %v", ValidPowerControlStates))),
+		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 	)
 }
 
@@ -88,6 +99,12 @@ type APIBatchUpdateRackPowerStateRequest struct {
 	SiteID string      `json:"siteId"`
 	Filter *RackFilter `json:"filter,omitempty"`
 	State  string      `json:"state"`
+	// RuleID, when set, pins every task spawned by this batch to the named
+	// Operation Rule. See APIUpdatePowerStateRequest.RuleID for semantics.
+	RuleID *string `json:"ruleId"`
+	// OverrideReadinessCheck applies the readiness-gate bypass to every task
+	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
+	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
 }
 
 // Validate checks required fields and power state validity.
@@ -100,6 +117,7 @@ func (r *APIBatchUpdateRackPowerStateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.In(validPowerControlStatesAny...).Error(
 				fmt.Sprintf("must be one of %v", ValidPowerControlStates))),
+		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 	)
 }
 
@@ -110,6 +128,12 @@ type APIBatchUpdateTrayPowerStateRequest struct {
 	SiteID string      `json:"siteId"`
 	Filter *TrayFilter `json:"filter,omitempty"`
 	State  string      `json:"state"`
+	// RuleID, when set, pins every task spawned by this batch to the named
+	// Operation Rule. See APIUpdatePowerStateRequest.RuleID for semantics.
+	RuleID *string `json:"ruleId"`
+	// OverrideReadinessCheck applies the readiness-gate bypass to every task
+	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
+	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
 }
 
 // Validate checks required fields, power state validity, and filter constraints.
@@ -125,5 +149,6 @@ func (r *APIBatchUpdateTrayPowerStateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.In(validPowerControlStatesAny...).Error(
 				fmt.Sprintf("must be one of %v", ValidPowerControlStates))),
+		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 	)
 }

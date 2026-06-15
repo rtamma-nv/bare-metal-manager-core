@@ -15,14 +15,15 @@
  * limitations under the License.
  */
 
-use common::api_fixtures::managed_host::ManagedHostConfig;
 use common::api_fixtures::{
     FIXTURE_DHCP_RELAY_ADDRESS, TestEnv, create_managed_host, create_managed_host_with_config,
     create_test_env, dpu,
 };
+use model::test_support::ManagedHostConfig;
 use rpc::forge::IpType;
 use rpc::forge::forge_server::Forge;
 
+use crate::test_support::fixture_config::FixtureDefault as _;
 use crate::tests::common;
 
 /// Test searching for an IP address. Tests all the cases in a single
@@ -401,7 +402,7 @@ async fn test_static_bmc_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Re
     let bmc_mac = "AA:BB:CC:DD:EE:99".parse().unwrap();
 
     let mut txn = db_pool.begin().await.unwrap();
-    db::machine_interface::preallocate_machine_interface(txn.as_mut(), bmc_mac, static_ip)
+    db::machine_interface::preallocate_machine_interface(txn.as_mut(), bmc_mac, static_ip, None)
         .await
         .expect("preallocate static BMC interface");
     txn.commit().await.unwrap();

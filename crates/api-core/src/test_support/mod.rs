@@ -17,15 +17,17 @@
 
 pub mod builder;
 pub mod default_config;
-pub mod endpoint_explorer;
+pub mod fixture_config;
 pub mod ib_fabric;
+pub mod ib_guid_pool;
+pub mod mac_address_pool;
 pub mod network;
 pub mod network_segment;
 
 use std::sync::Arc;
 
+use carbide_secrets::credentials::CredentialManager;
 use db::work_lock_manager::WorkLockManagerHandle;
-use forge_secrets::credentials::CredentialManager;
 use model::resource_pool::common::CommonPools;
 pub use rpc;
 

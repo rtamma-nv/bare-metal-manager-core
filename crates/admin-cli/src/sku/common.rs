@@ -18,12 +18,32 @@
 use clap::Parser;
 
 #[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+List all SKUs:
+    $ nico-admin-cli sku show
+
+Show details for one SKU:
+    $ nico-admin-cli sku show DGX-H100-640GB
+
+")]
 pub struct ShowSkuOptions {
     #[clap(help = "Show SKU details")]
     pub sku_id: Option<String>,
 }
 
 #[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Create SKUs from a file:
+    $ nico-admin-cli sku create ./skus.json
+
+Create from a file but override the SKU ID:
+    $ nico-admin-cli sku create ./skus.json --id DGX-H100-640GB
+
+")]
 pub struct CreateSkuOptions {
     #[clap(help = "The filename of the SKU data")]
     pub filename: String,

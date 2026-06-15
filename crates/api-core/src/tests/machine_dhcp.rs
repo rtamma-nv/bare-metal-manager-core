@@ -20,7 +20,6 @@ use std::str::FromStr;
 
 use carbide_network::ip::IpAddressFamily;
 use carbide_uuid::machine::MachineInterfaceId;
-use common::api_fixtures::managed_host::ManagedHostConfig;
 use common::api_fixtures::network_segment::{
     FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY,
     create_host_inband_network_segment, create_network_segment,
@@ -36,10 +35,12 @@ use itertools::Itertools;
 use mac_address::MacAddress;
 use model::machine_interface::InterfaceType;
 use model::network_segment::NetworkSegmentType;
+use model::test_support::ManagedHostConfig;
 use rpc::forge::ManagedHostNetworkConfigRequest;
 use rpc::forge::forge_server::Forge;
 
 use crate::DatabaseError;
+use crate::test_support::fixture_config::ManagedHostConfigExt as _;
 use crate::tests::common;
 use crate::tests::common::rpc_builder::DhcpDiscovery;
 
@@ -55,6 +56,7 @@ async fn test_machine_dhcp(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error:
         &mut txn,
         test_mac_address,
         std::slice::from_ref(&test_gateway_address),
+        None,
         None,
     )
     .await?;
@@ -79,6 +81,7 @@ async fn test_machine_dhcp_from_wrong_vlan_fails(
         test_mac_address,
         std::slice::from_ref(&test_gateway_address),
         None,
+        None,
     )
     .await?;
 
@@ -88,6 +91,7 @@ async fn test_machine_dhcp_from_wrong_vlan_fails(
         test_mac_address,
         std::slice::from_ref(&test_gateway_address),
         None,
+        None,
     )
     .await?;
 
@@ -96,6 +100,7 @@ async fn test_machine_dhcp_from_wrong_vlan_fails(
         &mut txn,
         test_mac_address,
         &["192.0.1.1".parse().unwrap()],
+        None,
         None,
     )
     .await;

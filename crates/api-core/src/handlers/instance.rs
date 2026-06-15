@@ -21,11 +21,11 @@ use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, AdminForceDeleteMachineResponse};
 use ::rpc::model::RpcTryFrom;
 use carbide_redfish::libredfish::RedfishAuth;
+use carbide_secrets::credentials::{BmcCredentialType, CredentialKey};
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::MachineId;
 use db::{DatabaseError, WithTransaction, extension_service, network_security_group};
-use forge_secrets::credentials::{BmcCredentialType, CredentialKey};
 use futures_util::FutureExt;
 use health_report::{
     HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode,
@@ -1022,10 +1022,11 @@ pub(crate) async fn invoke_power(
     // TODO: The API call should maybe not directly trigger the reboot
     // but instead queue it for the state handler. That will avoid racing
     // with other internal reboot requests from the state handler.
+    let bmc_ip = bmc_ip.to_string();
     let client = api
         .redfish_pool
         .create_client(
-            bmc_ip,
+            &bmc_ip,
             snapshot.host_snapshot.bmc_info.port,
             RedfishAuth::Key(CredentialKey::BmcCredentials {
                 credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },

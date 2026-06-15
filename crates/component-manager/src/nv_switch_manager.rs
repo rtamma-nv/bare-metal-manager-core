@@ -4,12 +4,32 @@
 use std::fmt::Debug;
 use std::net::IpAddr;
 
-use forge_secrets::credentials::Credentials;
+use carbide_secrets::credentials::Credentials;
 use mac_address::MacAddress;
 use model::component_manager::{FirmwareState, NvSwitchComponent, PowerAction};
 
 use crate::error::ComponentManagerError;
 use crate::types::FirmwareUpdateOptions;
+
+/// Selects which `NvSwitchManager` backend is used
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    Nsm,
+    #[default]
+    Rms,
+    Mock,
+}
+
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Nsm => f.write_str("nsm"),
+            Self::Rms => f.write_str("rms"),
+            Self::Mock => f.write_str("mock"),
+        }
+    }
+}
 
 /// Physical network identifiers for an NV-Switch, used to register with and
 /// operate against the backend service (NSM).
@@ -44,6 +64,23 @@ pub struct SwitchSlotAndTrayResult {
     pub slot_number: Option<i32>,
     pub tray_index: Option<i32>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchPowerStateResult {
+    pub bmc_mac: MacAddress,
+    pub power_state: Option<String>,
+    pub error: Option<String>,
+}
+
+impl crate::component_common::ComponentPowerStateResult for SwitchPowerStateResult {
+    fn power_state(&self) -> Option<&str> {
+        self.power_state.as_deref()
+    }
+
+    fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
 }
 
 /// Backend trait for NV-Switch management operations.
@@ -85,4 +122,9 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
         &self,
         endpoints: &[SwitchEndpoint],
     ) -> Result<Vec<SwitchSlotAndTrayResult>, ComponentManagerError>;
+
+    async fn get_power_state(
+        &self,
+        endpoints: &[SwitchEndpoint],
+    ) -> Result<Vec<SwitchPowerStateResult>, ComponentManagerError>;
 }

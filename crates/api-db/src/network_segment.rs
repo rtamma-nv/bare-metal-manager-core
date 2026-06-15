@@ -931,11 +931,12 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let def = NetworkDefinition {
             segment_type: NetworkDefinitionSegmentType::Admin,
-            prefix: "192.168.1.0/24".to_string(),
-            gateway: "192.168.1.1".to_string(),
+            prefix: "192.168.1.0/24".parse().unwrap(),
+            gateway: "192.168.1.1".parse().unwrap(),
             mtu: 1500,
             reserve_first: 5,
             allocation_strategy: Default::default(),
+            vpc_name: None,
         };
 
         let mut txn = pool.begin().await?;
@@ -967,11 +968,12 @@ mod tests {
     fn def(prefix: &str, gateway: &str) -> NetworkDefinition {
         NetworkDefinition {
             segment_type: NetworkDefinitionSegmentType::Admin,
-            prefix: prefix.to_string(),
-            gateway: gateway.to_string(),
+            prefix: prefix.parse().unwrap(),
+            gateway: gateway.parse().unwrap(),
             mtu: 1500,
             reserve_first: 3,
             allocation_strategy: Default::default(),
+            vpc_name: None,
         }
     }
 

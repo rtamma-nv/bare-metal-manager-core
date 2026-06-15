@@ -28,13 +28,13 @@ use std::time::Instant;
 use carbide_firmware::{FirmwareConfig, FirmwareConfigSnapshot};
 use carbide_network::sanitized_mac;
 use carbide_redfish::libredfish::conv::IntoModel;
+use carbide_secrets::credentials::CredentialManager;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineType;
 use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
 use chrono::Utc;
 use config::SiteExplorerConfig;
 use db::{self, DatabaseError, ObjectFilter, Transaction, machine, power_shelf as db_power_shelf};
-use forge_secrets::credentials::CredentialManager;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
@@ -62,6 +62,8 @@ mod endpoint_explorer;
 pub use endpoint_explorer::EndpointExplorer;
 mod credentials;
 mod metrics;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub use metrics::SiteExplorationMetrics;
 mod bmc_endpoint_explorer;
 mod redfish;
@@ -197,16 +199,22 @@ pub(crate) async fn ensure_rack_exists(
 /// Returns `(None, None)` on any failure, logging a warning with `entity_label`.
 pub async fn fetch_slot_and_tray(
     rms_client: &dyn librms::RmsApi,
-    request: librms::protos::rack_manager::GetDeviceInfoByDeviceListRequest,
+    request: librms::protos::rack_manager::BatchGetNodeDeviceInfoRequest,
 ) -> (Option<i32>, Option<i32>) {
-    match rms_client.get_device_info_by_device_list(request).await {
+    match rms_client.batch_get_node_device_info(request).await {
         Ok(info) => {
-            if !info.node_device_info.is_empty() {
-                let node_device_info = info.node_device_info.first().unwrap();
-                (node_device_info.slot_number, node_device_info.tray_index)
-            } else {
-                (None, None)
-            }
+            let Some(node_device_details) = info.node_device_details.first() else {
+                return (None, None);
+            };
+
+            let slot_number = node_device_details
+                .slot_number
+                .and_then(|value| i32::try_from(value).ok());
+            let tray_index = node_device_details
+                .tray_index
+                .and_then(|value| i32::try_from(value).ok());
+
+            (slot_number, tray_index)
         }
         Err(e) => {
             tracing::warn!(
@@ -403,6 +411,8 @@ impl SiteExplorer {
             tracing::Level::INFO,
             "explore_site",
             span_id,
+            carbide.trace_root = true,
+            component = "site-explorer",
             otel.status_code = tracing::field::Empty,
             otel.status_message = tracing::field::Empty,
             created_machines = tracing::field::Empty,
@@ -726,6 +736,29 @@ impl SiteExplorer {
         // Audit after everything has been explored, identified, and created.
         self.audit_exploration_results(metrics, &expected_endpoint_index)
             .await?;
+
+        // Retained boot interface records that aged out of the configured
+        // window are already ignored at read time; sweep them once per pass
+        // so MACs that never return don't occupy table rows indefinitely.
+        // (A no-op without a window: records wait for their machine.)
+        if self.config.retained_boot_interface_window.is_some() {
+            let mut txn = self
+                .database_connection
+                .begin()
+                .await
+                .map_err(|e| DatabaseError::new("begin retained boot interface sweep", e))?;
+            let swept = db::retained_boot_interface::delete_expired(
+                &mut txn,
+                self.config.retained_boot_interface_window,
+            )
+            .await?;
+            txn.commit()
+                .await
+                .map_err(|e| DatabaseError::new("end retained boot interface sweep", e))?;
+            if swept > 0 {
+                tracing::info!(swept, "Removed expired retained boot interface records");
+            }
+        }
 
         Ok(identified_hosts)
     }
@@ -1175,28 +1208,45 @@ impl SiteExplorer {
                         );
 
                         if !all_dpus_configured_properly_in_host {
-                            if ep.report.vendor.is_some_and(|vendor| vendor.is_dell()) {
-                                let time_since_redfish_powercycle = Utc::now()
-                                    .signed_duration_since(
-                                        ep.last_redfish_powercycle.unwrap_or_default(),
-                                    );
-                                if time_since_redfish_powercycle > self.config.reset_rate_limit {
-                                    tracing::warn!(
-                                        "power cycling Dell {} to apply nic mode change for its incorrectly configured DPUs; time since last powercycle: {time_since_redfish_powercycle}",
-                                        ep.address,
-                                    );
+                            // A queued `set_nic_mode` only takes effect after a host
+                            // power cycle, so drive one for every vendor -- the
+                            // Redfish `ComputerSystem.Reset` action is standard
+                            // across BMCs -- throttled by `reset_rate_limit`. A BMC
+                            // that refuses the request surfaces the host as needing
+                            // a manual power cycle via the pairing-blocker metric.
+                            let time_since_redfish_powercycle = Utc::now().signed_duration_since(
+                                ep.last_redfish_powercycle.unwrap_or_default(),
+                            );
+                            if time_since_redfish_powercycle > self.config.reset_rate_limit {
+                                tracing::warn!(
+                                    "power cycling host {} to apply nic mode change for its incorrectly configured DPUs; time since last powercycle: {time_since_redfish_powercycle}",
+                                    ep.address,
+                                );
 
-                                    self.redfish_powercycle(ep.address)
-                                        .await
-                                        .inspect_err(|err| tracing::warn!("site explorer failed to power cycle host {} to apply DPU mode changes: {err}", ep.address))
-                                        .ok();
+                                if let Err(err) = self.redfish_powercycle(ep.address).await {
+                                    tracing::warn!(
+                                        "site explorer failed to power cycle host {} to apply DPU mode changes: {err}; a manual power cycle may be required",
+                                        ep.address
+                                    );
+                                    metrics.increment_host_dpu_pairing_blocker(
+                                        PairingBlockerReason::ManualPowerCycleRequired,
+                                    );
                                 }
                             } else {
-                                tracing::warn!(
-                                    "wait for manual power cycle of host {}; site explorer doesn't support power cycling vendor {:#?}",
-                                    ep.address,
-                                    ep.report.vendor
-                                );
+                                // We power-cycled within the rate limit and the
+                                // DPUs still aren't in the declared mode -- either
+                                // the change is mid-flight (the host is booting, a
+                                // pass or two of normal convergence) or this
+                                // vendor's `PowerCycle` is a warm reset that never
+                                // actually drops power. Keep the pairing-blocker
+                                // signal standing so a host stuck in the warm-reset
+                                // loop stays visible to operators instead of
+                                // rebooting hourly in silence.
+                                //
+                                // TODO(chet): If the power cycle doesn't appear to
+                                // be flipping the NIC to the expected mode, this is
+                                // where we'd want to introduce a cold power cycle
+                                // (`ForceOff`/`On` or similar).
                                 metrics.increment_host_dpu_pairing_blocker(
                                     PairingBlockerReason::ManualPowerCycleRequired,
                                 );
@@ -1355,11 +1405,20 @@ impl SiteExplorer {
 
         // Record each host NIC's Redfish id on its machine_interfaces row so the
         // primary-flagged row is the host's complete boot interface (MAC + id).
+        // Pending predicted interfaces get the same refresh, so a prediction
+        // minted before the report resolved the id stays as current as the
+        // live report until DHCP promotes it.
         for boot_interface in &nic_boot_interfaces {
             db::machine_interface::set_boot_interface_id(
                 boot_interface.mac_address,
                 &boot_interface.interface_id,
                 &mut txn,
+            )
+            .await?;
+            db::predicted_machine_interface::set_boot_interface_id(
+                &mut txn,
+                boot_interface.mac_address,
+                &boot_interface.interface_id,
             )
             .await?;
         }
@@ -1554,24 +1613,13 @@ impl SiteExplorer {
                     bmc_ip,
                     InterfaceType::Bmc,
                     "expected_machine BMC",
+                    self.config.retained_boot_interface_window,
                 )
                 .await;
             }
             for nic in &expected_machine.data.host_nics {
-                let Some(ip_str) = nic.fixed_ip.as_deref() else {
+                let Some(ip) = nic.fixed_ip else {
                     continue;
-                };
-                let ip: IpAddr = match ip_str.parse() {
-                    Ok(ip) => ip,
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            nic_mac = %nic.mac_address,
-                            fixed_ip = %ip_str,
-                            "Site-explorer preallocation: invalid fixed_ip on expected_machine host NIC"
-                        );
-                        continue;
-                    }
                 };
                 try_preallocate_one(
                     &self.database_connection,
@@ -1579,6 +1627,7 @@ impl SiteExplorer {
                     ip,
                     InterfaceType::Data,
                     "expected_machine host NIC",
+                    self.config.retained_boot_interface_window,
                 )
                 .await;
             }
@@ -1592,6 +1641,7 @@ impl SiteExplorer {
                     bmc_ip,
                     InterfaceType::Bmc,
                     "expected_switch BMC",
+                    self.config.retained_boot_interface_window,
                 )
                 .await;
             }
@@ -1608,6 +1658,7 @@ impl SiteExplorer {
                             nvos_ip,
                             InterfaceType::Data,
                             "expected_switch NVOS",
+                            self.config.retained_boot_interface_window,
                         )
                         .await;
                     }
@@ -1631,6 +1682,7 @@ impl SiteExplorer {
                     bmc_ip,
                     InterfaceType::Bmc,
                     "expected_power_shelf BMC",
+                    self.config.retained_boot_interface_window,
                 )
                 .await;
             }
@@ -2816,6 +2868,7 @@ pub async fn try_preallocate_one(
     ip: IpAddr,
     interface_type: InterfaceType,
     kind: &'static str,
+    retained_window: Option<chrono::Duration>,
 ) {
     let mut txn = match db::Transaction::begin(pool).await {
         Ok(t) => t,
@@ -2829,10 +2882,22 @@ pub async fn try_preallocate_one(
     };
     let result = match interface_type {
         InterfaceType::Bmc => {
-            db::machine_interface::preallocate_bmc_machine_interface(txn.as_pgconn(), mac, ip).await
+            db::machine_interface::preallocate_bmc_machine_interface(
+                txn.as_pgconn(),
+                mac,
+                ip,
+                retained_window,
+            )
+            .await
         }
         InterfaceType::Data => {
-            db::machine_interface::preallocate_machine_interface(txn.as_pgconn(), mac, ip).await
+            db::machine_interface::preallocate_machine_interface(
+                txn.as_pgconn(),
+                mac,
+                ip,
+                retained_window,
+            )
+            .await
         }
     };
     match result {
@@ -3130,6 +3195,8 @@ fn should_alert_power_state(power_state: PowerState) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{Case, check_cases};
     use config_version::ConfigVersion;
     use model::site_explorer::PreingestionState;
 
@@ -3260,10 +3327,11 @@ mod tests {
 
     #[test]
     fn test_find_host_pf_mac_address() {
-        let ep_report: EndpointExplorationReport = load_bf2_ep_report();
-        let ep = ExploredEndpoint {
+        // A freshly-loaded BF2 endpoint; each case starts from one of these and
+        // perturbs the firmware inventory the legacy MAC lookup reads from.
+        let endpoint = || ExploredEndpoint {
             address: "10.217.132.202".parse().unwrap(),
-            report: ep_report,
+            report: load_bf2_ep_report(),
             report_version: ConfigVersion::initial(),
             preingestion_state: PreingestionState::Initial,
             waiting_for_explorer_refresh: false,
@@ -3278,73 +3346,72 @@ mod tests {
             boot_interface_id: None,
         };
 
-        assert_eq!(
-            find_host_pf_mac_address(&ep).unwrap(),
-            "B8:3F:D2:90:95:F4".parse().unwrap()
-        );
+        // Override the `DPU_SYS_IMAGE` firmware version the legacy path parses.
+        let with_sys_image = |version: &str| {
+            let mut ep = endpoint();
+            let inv = ep
+                .report
+                .service
+                .iter_mut()
+                .find(|s| s.id == "FirmwareInventory")
+                .unwrap()
+                .inventories
+                .iter_mut()
+                .find(|inv| inv.id == "DPU_SYS_IMAGE")
+                .unwrap();
+            inv.version = Some(version.to_string());
+            ep
+        };
 
-        // Invalid DPU_SYS_IMAGE field
-        let mut ep1 = ep.clone();
-        let update_service = ep1
-            .report
-            .service
-            .iter_mut()
-            .find(|s| s.id == "FirmwareInventory")
-            .unwrap();
-        let inv = update_service
-            .inventories
-            .iter_mut()
-            .find(|inv| inv.id == "DPU_SYS_IMAGE")
-            .unwrap();
-        inv.version = Some("b83f:d203:0090:95fz".to_string());
-        assert_eq!(
-            find_host_pf_mac_address(&ep1),
-            Err("Failed to build sanitized MAC from legacy/service MAC: Invalid stripped MAC length: 11 (input: b83fd29095fz, output: b83fd29095f) (source_mac: b83fd29095fz)".to_string())
-        );
+        // Drop the firmware-inventory entry whose `id` matches `inventory_id`.
+        let without_inventory = |inventory_id: &str| {
+            let mut ep = endpoint();
+            ep.report
+                .service
+                .iter_mut()
+                .find(|s| s.id == "FirmwareInventory")
+                .unwrap()
+                .inventories
+                .retain(|inv| inv.id != inventory_id);
+            ep
+        };
 
-        // Invalid DPU_SYS_IMAGE field
-        let mut ep1 = ep.clone();
-        let update_service = ep1
-            .report
-            .service
-            .iter_mut()
-            .find(|s| s.id == "FirmwareInventory")
-            .unwrap();
-        let inv = update_service
-            .inventories
-            .iter_mut()
-            .find(|inv| inv.id == "DPU_SYS_IMAGE")
-            .unwrap();
-        inv.version = Some("abc".to_string());
-        assert_eq!(
-            find_host_pf_mac_address(&ep1),
-            Err("Invalid sys_image_version length: 3 (abc)".to_string())
-        );
+        // Drop the whole `FirmwareInventory` service.
+        let without_firmware_inventory = || {
+            let mut ep = endpoint();
+            ep.report.service.retain(|s| s.id != "FirmwareInventory");
+            ep
+        };
 
-        // Missing DPU_SYS_IMAGE field
-        let mut ep1 = ep.clone();
-        let update_service = ep1
-            .report
-            .service
-            .iter_mut()
-            .find(|s| s.id == "FirmwareInventory")
-            .unwrap();
-        update_service
-            .inventories
-            .retain_mut(|inv| inv.id != "DPU_SYS_IMAGE");
-        assert_eq!(
-            find_host_pf_mac_address(&ep1),
-            Err("Missing DPU_SYS_IMAGE".to_string())
-        );
-
-        // Missing FirmwareInventory field
-        let mut ep1 = ep;
-        ep1.report
-            .service
-            .retain_mut(|inv| inv.id != "FirmwareInventory");
-        assert_eq!(
-            find_host_pf_mac_address(&ep1),
-            Err("Missing FirmwareInventory".to_string())
+        check_cases(
+            [
+                Case {
+                    scenario: "legacy sys-image MAC, sanitized",
+                    input: endpoint(),
+                    expect: Yields("B8:3F:D2:90:95:F4".parse().unwrap()),
+                },
+                Case {
+                    scenario: "legacy sys-image MAC fails sanitization",
+                    input: with_sys_image("b83f:d203:0090:95fz"),
+                    expect: FailsWith("Failed to build sanitized MAC from legacy/service MAC: Invalid stripped MAC length: 11 (input: b83fd29095fz, output: b83fd29095f) (source_mac: b83fd29095fz)".to_string()),
+                },
+                Case {
+                    scenario: "legacy sys-image is too short",
+                    input: with_sys_image("abc"),
+                    expect: FailsWith("Invalid sys_image_version length: 3 (abc)".to_string()),
+                },
+                Case {
+                    scenario: "no DPU_SYS_IMAGE inventory",
+                    input: without_inventory("DPU_SYS_IMAGE"),
+                    expect: FailsWith("Missing DPU_SYS_IMAGE".to_string()),
+                },
+                Case {
+                    scenario: "no FirmwareInventory service",
+                    input: without_firmware_inventory(),
+                    expect: FailsWith("Missing FirmwareInventory".to_string()),
+                },
+            ],
+            |ep| find_host_pf_mac_address(&ep),
         );
     }
 

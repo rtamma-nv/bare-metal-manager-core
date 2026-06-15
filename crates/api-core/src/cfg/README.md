@@ -19,7 +19,7 @@ applicable.
 | `max_database_connections` | `u32` | `1000` | Maximum database connection pool size. |
 | `ib_config` | `Option<IBFabricConfig>` | — | InfiniBand fabric configuration (see [IBFabricConfig](#ibfabricconfig)). |
 | `asn` | `u32` | **required** | Autonomous System Number, fixed per environment. Used by nico-dpu-agent for `frr.conf` BGP routing. |
-| `dhcp_servers` | `Vec<String>` | `[]` | DHCP server addresses announced to DPUs during network provisioning. |
+| `dhcp_servers` | `Vec<Ipv4Addr>` | `[]` | DHCP server addresses announced to DPUs during network provisioning. |
 | `route_servers` | `Vec<String>` | `[]` | Route server IPs for L2VPN Ethernet Virtual network support. |
 | `enable_route_servers` | `bool` | `false` | Enables route server injection into DPU FRR configs for L2VPN. |
 | `deny_prefixes` | `Vec<Ipv4Network>` | `[]` | IPv4 CIDR prefixes that tenant instances are blocked from reaching. Generates iptables DROP rules and nvue ACL policies. |
@@ -27,6 +27,7 @@ applicable.
 | `anycast_site_prefixes` | `Vec<Ipv4Network>` | `[]` | Aggregate IPv4 prefixes containing tenant-announced prefixes (e.g., BYOIP). **Deprecated.** Use [`routing_profiles.allowed_anycast_prefixes`](#fnnroutingprofileconfig) instead. |
 | `common_tenant_host_asn` | `Option<u32>` | — | ASN that tenants use to peer with the DPU. If unset, any ASN is accepted. |
 | `vpc_isolation_behavior` | `VpcIsolationBehaviorType` | `MutualIsolation` | VPC isolation policy: `mutual_isolation` or `open`. |
+| `host_naming_strategy` | `HostNamingStrategyKind` | `IpAddress` | How new machine hostnames are derived: `ip_address` (IP-derived, e.g. `10-1-2-3`; the default and backwards-compatible), `fun` (stable adjective-noun handles like `wholesale-walrus`), `serial_number` (a machine's hardware serial -- the primary interface gets the bare serial, secondary interfaces get `serial-<mac>`, BMC interfaces stay IP-named), or `mac_address` (each interface's own MAC, e.g. `0a-1b-2c-3d-4e-5f`). Only `fun` leaves existing hostnames unchanged -- it keeps any real name, whether IP-, serial-, or MAC-derived, so after a switch fun names appear only on newly named interfaces; the others re-derive, so switching to one progressively renames interfaces as they reconcile. Junk placeholder serials (e.g. `To Be Filled By O.E.M.`) fall back to the IP name, and `serial_number` errors on duplicate serials rather than assigning a substitute name. |
 | `dpu_network_monitor_pinger_type` | `Option<String>` | — | Pinger implementation type (e.g., `"OobNetBind"`) for DPU link health checks. |
 | `tls` | `Option<TlsConfig>` | — | TLS certificate/key paths (see [TlsConfig](#tlsconfig)). |
 | `listen_mode` | `ListenMode` | `Tls` | Transport mode: `plaintext_http1`, `plaintext_http2`, or `tls`. |
@@ -41,6 +42,7 @@ applicable.
 | `initial_dpu_agent_upgrade_policy` | `Option<AgentUpgradePolicyChoice>` | — | Policy for nico-dpu-agent upgrades. Also settable via `nico-admin-cli`. |
 | `max_concurrent_machine_updates` | `Option<i32>` | — | **Deprecated.** Use `machine_updater` instead. |
 | `machine_update_run_interval` | `Option<u64>` | — | Interval (seconds) at which the machine update manager checks for updates. |
+| `retained_boot_interface_window` | `Option<Duration>` | — (forever) | How long a retained boot interface pair (`retained_boot_interfaces` table) stays applicable after its `machine_interfaces` row was deleted. Unset retains forever; set a window (e.g. `30d`) so a MAC reappearing on different hardware doesn't inherit an obsolete Redfish interface id. |
 | `site_explorer` | `SiteExplorerConfig` | *(see below)* | SiteExplorer hardware discovery settings (see [SiteExplorerConfig](#siteexplorerconfig)). |
 | `nvue_enabled` | `bool` | `true` | DPU agent uses NVUE for config instead of writing files directly. |
 | `vpc_peering_policy` | `Option<VpcPeeringPolicy>` | — | Policy for VPC peering based on network virtualization type at creation time. |
@@ -63,6 +65,7 @@ applicable.
 | `network_security_group` | `NetworkSecurityGroupConfig` | *(see below)* | NSG settings (see [NetworkSecurityGroupConfig](#networksecuritygroupconfig)). |
 | `min_dpu_functioning_links` | `Option<u32>` | — | Minimum functioning DPU links for healthy status. If unset, all must work. |
 | `host_health` | `HostHealthConfig` | *(default)* | Host health monitoring thresholds for hardware health and DPU agent compliance. |
+| `observability` | `ObservabilityConfig` | *(default)* | Observability settings shared across all state controllers (see [ObservabilityConfig](#observabilityconfig)). |
 | `internet_l3_vni` | `u32` | `100001` | Network infrastructure-provided L3 VNI for FNN VPC Internet connectivity. Combined with `datacenter_asn` for route-target. |
 | `measured_boot_collector` | `MeasuredBootMetricsCollectorConfig` | *(see below)* | Measured boot metrics exporter (see [MeasuredBootMetricsCollectorConfig](#measuredbootmetricscollectorconfig)). |
 | `machine_validation_config` | `MachineValidationConfig` | *(see below)* | Machine validation tests (see [MachineValidationConfig](#machinevalidationconfig)). |
@@ -182,6 +185,14 @@ partition, DPA interface, rack, power shelf, switch, SPDM).
 | `processor_log_interval` | `Duration` | `60s` | How often the processor emits log messages. |
 | `metric_emission_interval` | `Duration` | `60s` | How often aggregate metrics are recalculated. |
 | `metric_hold_time` | `Duration` | `5m` | How long per-object metrics are held before eviction. |
+
+### `ObservabilityConfig`
+
+TOML section: `[observability]`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `per_object_metrics_for_classifications` | `Vec<HealthAlertClassification>` | `[]` | Health alert classifications for which the per-object metric `carbide_object_unhealthy_by_classification_count` is emitted, labeled with `object_type` (e.g. `machine`, `switch`, `rack`, `power_shelf`) and `object_id`. Each entry adds up to one extra time series per matching object, so it defaults to empty (disabled) to keep metric cardinality bounded. When empty, the metric is not registered or exposed at all; aggregate health metrics are unaffected regardless. |
 
 ### `MachineStateControllerConfig`
 

@@ -20,6 +20,22 @@ use mac_address::MacAddress;
 use rpc::forge::DeletedFilter;
 
 #[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+List all live power shelves:
+    $ nico-admin-cli power-shelf list
+
+Include deleted power shelves:
+    $ nico-admin-cli power-shelf list --deleted include
+
+Filter by controller state:
+    $ nico-admin-cli power-shelf list --controller-state ready
+
+Find a power shelf by its BMC MAC address:
+    $ nico-admin-cli power-shelf list --bmc-mac 00:11:22:33:44:55
+
+")]
 pub struct Args {
     /// Include deleted power shelves
     #[clap(long, value_enum, default_value = "exclude")]

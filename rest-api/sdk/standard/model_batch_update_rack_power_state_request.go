@@ -4,7 +4,7 @@
 /*
 NVIDIA Infra Controller REST API
 
-NVIDIA Infra Controller REST API allows users to create and manage resources e.g. VPC, Subnets, Instances across all connected NVIDIA Infra Controller datacenters, also referred to as Sites.
+NVIDIA Infra Controller REST API allows users to create and manage resources, e.g., VPCs, Subnets, and Instances, across all connected NVIDIA Infra Controller datacenters, also referred to as Sites.
 
 API version: 1.6.0
 */
@@ -25,10 +25,15 @@ var _ MappedNullable = &BatchUpdateRackPowerStateRequest{}
 // BatchUpdateRackPowerStateRequest Request body for batch rack power control operations
 type BatchUpdateRackPowerStateRequest struct {
 	// ID of the Site
-	SiteId string      `json:"siteId"`
+	SiteId string `json:"siteId"`
+	// Filter that selects Racks whose power state should be updated
 	Filter *RackFilter `json:"filter,omitempty"`
 	// Target power state
 	State string `json:"state"`
+	// Optional Operation Rule UUID. When set, pins every task spawned by this batch to the named rule and overrides Flow's default rule resolution.
+	RuleId *string `json:"ruleId,omitempty"`
+	// When true, proceed even if one or more target components (or hosts on the owning rack for rack-scoped components) are reported as not ready by their persisted status. Intended for operator-supervised maintenance.
+	OverrideReadinessCheck *bool `json:"overrideReadinessCheck,omitempty"`
 }
 
 type _BatchUpdateRackPowerStateRequest BatchUpdateRackPowerStateRequest
@@ -41,6 +46,8 @@ func NewBatchUpdateRackPowerStateRequest(siteId string, state string) *BatchUpda
 	this := BatchUpdateRackPowerStateRequest{}
 	this.SiteId = siteId
 	this.State = state
+	var overrideReadinessCheck bool = false
+	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
 }
 
@@ -49,6 +56,8 @@ func NewBatchUpdateRackPowerStateRequest(siteId string, state string) *BatchUpda
 // but it doesn't guarantee that properties required by API are set
 func NewBatchUpdateRackPowerStateRequestWithDefaults() *BatchUpdateRackPowerStateRequest {
 	this := BatchUpdateRackPowerStateRequest{}
+	var overrideReadinessCheck bool = false
+	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
 }
 
@@ -132,6 +141,70 @@ func (o *BatchUpdateRackPowerStateRequest) SetState(v string) {
 	o.State = v
 }
 
+// GetRuleId returns the RuleId field value if set, zero value otherwise.
+func (o *BatchUpdateRackPowerStateRequest) GetRuleId() string {
+	if o == nil || IsNil(o.RuleId) {
+		var ret string
+		return ret
+	}
+	return *o.RuleId
+}
+
+// GetRuleIdOk returns a tuple with the RuleId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BatchUpdateRackPowerStateRequest) GetRuleIdOk() (*string, bool) {
+	if o == nil || IsNil(o.RuleId) {
+		return nil, false
+	}
+	return o.RuleId, true
+}
+
+// HasRuleId returns a boolean if a field has been set.
+func (o *BatchUpdateRackPowerStateRequest) HasRuleId() bool {
+	if o != nil && !IsNil(o.RuleId) {
+		return true
+	}
+
+	return false
+}
+
+// SetRuleId gets a reference to the given string and assigns it to the RuleId field.
+func (o *BatchUpdateRackPowerStateRequest) SetRuleId(v string) {
+	o.RuleId = &v
+}
+
+// GetOverrideReadinessCheck returns the OverrideReadinessCheck field value if set, zero value otherwise.
+func (o *BatchUpdateRackPowerStateRequest) GetOverrideReadinessCheck() bool {
+	if o == nil || IsNil(o.OverrideReadinessCheck) {
+		var ret bool
+		return ret
+	}
+	return *o.OverrideReadinessCheck
+}
+
+// GetOverrideReadinessCheckOk returns a tuple with the OverrideReadinessCheck field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BatchUpdateRackPowerStateRequest) GetOverrideReadinessCheckOk() (*bool, bool) {
+	if o == nil || IsNil(o.OverrideReadinessCheck) {
+		return nil, false
+	}
+	return o.OverrideReadinessCheck, true
+}
+
+// HasOverrideReadinessCheck returns a boolean if a field has been set.
+func (o *BatchUpdateRackPowerStateRequest) HasOverrideReadinessCheck() bool {
+	if o != nil && !IsNil(o.OverrideReadinessCheck) {
+		return true
+	}
+
+	return false
+}
+
+// SetOverrideReadinessCheck gets a reference to the given bool and assigns it to the OverrideReadinessCheck field.
+func (o *BatchUpdateRackPowerStateRequest) SetOverrideReadinessCheck(v bool) {
+	o.OverrideReadinessCheck = &v
+}
+
 func (o BatchUpdateRackPowerStateRequest) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -147,6 +220,12 @@ func (o BatchUpdateRackPowerStateRequest) ToMap() (map[string]interface{}, error
 		toSerialize["filter"] = o.Filter
 	}
 	toSerialize["state"] = o.State
+	if !IsNil(o.RuleId) {
+		toSerialize["ruleId"] = o.RuleId
+	}
+	if !IsNil(o.OverrideReadinessCheck) {
+		toSerialize["overrideReadinessCheck"] = o.OverrideReadinessCheck
+	}
 	return toSerialize, nil
 }
 

@@ -60,6 +60,7 @@ jobs:
               - '**'
               - '!rest-api/**'
               - '!.github/workflows/rest-*.yml'
+              - '!helm/rest/**'
 
       - name: Decide whether Core CI should run
         id: gate
@@ -506,6 +507,55 @@ jobs:
       tag_latest: false
     secrets: inherit
 
+  test-release-container-services:
+    if: ${{ always() && github.event_name != 'schedule' && needs.prepare.result == 'success' }}
+    needs:
+      - prepare
+      - build-container-x86_64
+      - build-runtime-container-x86_64
+    runs-on: linux-amd64-cpu16
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to NVCR
+        uses: ./.github/actions/docker-auth
+        with:
+          username: ${{ secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NVCR_TOKEN }}
+
+      - name: Run release-container service tests
+        env:
+          BUILD_CONTAINER: nvcr.io/0837451325059433/carbide-dev/build-container-x86_64:${{ needs.prepare.outputs.build_container_x86_64_version }}
+          CI_COMMIT_SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ github.workspace }}/.sccache"
+          docker pull "${BUILD_CONTAINER}"
+          docker run --rm \
+            -v "${{ github.workspace }}:/carbide" \
+            -v "${{ github.workspace }}/.sccache:/sccache" \
+            -w /carbide \
+            -e CARGO_HOME=/carbide/cargo \
+            -e CARGO_INCREMENTAL=0 \
+            -e CARGO_MAKE_SKIP_CODECOV=true \
+            -e DATABASE_URL='postgresql://root@%2Fvar%2Frun%2Fpostgresql/root' \
+            -e SCCACHE_DIR=/sccache \
+            -e RUSTC_WRAPPER=sccache \
+            -e CARGO_PROFILE_RELEASE_DEBUG=true \
+            -e CI_COMMIT_SHORT_SHA="${CI_COMMIT_SHORT_SHA}" \
+            -e VERSION="${VERSION}" \
+            -e CONTAINER_REPO_ROOT=/carbide \
+            "${BUILD_CONTAINER}" \
+            bash -c '
+              set -euo pipefail
+              git config --global --add safe.directory /carbide
+              /etc/init.d/postgresql start
+              sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;"
+              createdb root
+              cargo make test-release-container-services
+            '
 
   # ============================================================================
   # BUILD STAGE - Forge CLI (Multi-arch)
@@ -823,6 +873,27 @@ jobs:
 
       - name: Run Protolint
         run: protolint lint -config_path=.protolint.yaml crates/rpc/proto/
+
+  proto-breaking-changes:
+    name: Proto Breaking Changes Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required: Buf needs the history to compare against main
+
+      - name: Install Buf CLI
+        run: |
+          sudo curl -sSL https://github.com/bufbuild/buf/releases/download/v1.70.0/buf-Linux-x86_64 -o /usr/local/bin/buf
+          sudo chmod +x /usr/local/bin/buf
+          buf --version
+
+      - name: Check for Breaking Changes
+        run: |
+          buf breaking crates/rpc/proto \
+            --against 'https://github.com/${{ github.repository }}.git#branch=main,subdir=crates/rpc/proto' \
+            --error-format=github-actions
 
   lint-police:
     needs:
@@ -1209,6 +1280,7 @@ jobs:
       - build-artifacts-container-aarch64
       - build-release-container-x86_64
       - build-release-container-aarch64
+      - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
       - build-boot-artifacts-ephemeral-image-x86-host
@@ -1243,7 +1315,7 @@ jobs:
           echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
           echo "$NEEDS" | jq -r '
             to_entries[]
-            | select(.key | startswith("build-"))
+            | select((.key | startswith("build-")) or (.key | startswith("test-")))
             | "| \(.key) | \(if .value.result == "failure" then "**\(.value.result)**" else .value.result end) |"
           ' >> "$GITHUB_STEP_SUMMARY"
 
@@ -1311,6 +1383,7 @@ jobs:
       - build-artifacts-container-aarch64
       - build-release-container-x86_64
       - build-release-container-aarch64
+      - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
       - build-boot-artifacts-ephemeral-image-x86-host
@@ -1367,6 +1440,7 @@ jobs:
       - prepare
       - build-release-container-x86_64
       - build-release-container-aarch64
+      - test-release-container-services
       - security-secret-scan
       - lint-police
     steps:

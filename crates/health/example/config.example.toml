@@ -22,6 +22,8 @@ shards_count = 1
 cache_size = 100
 bmc_proxy_url = "http://proxy.example.com:8080"
 
+endpoint_discovery_interval = "5m"
+
 # ==============================================================================
 # Endpoint Sources: Where to discover BMC endpoints from
 # ==============================================================================
@@ -131,12 +133,18 @@ max_jitter = "40ms"
 # BMC Collectors: What data to collect from BMCs
 # ==============================================================================
 
+[collectors.discovery]
+refresh_interval = "60m"
+discovery_concurrency = 1
+
 [collectors.sensors]
-rediscover_interval = "5m"
-state_refresh_interval = "30m"
 sensor_fetch_interval = "1m"
 sensor_fetch_concurrency = 10
 include_sensor_thresholds = true
+
+[collectors.metrics]
+fetch_interval = "2m"
+fetch_concurrency = 4
 
 [collectors.firmware]
 firmware_refresh_interval = "30m"
@@ -195,6 +203,21 @@ request_timeout = "30s"
 system_health_enabled = true
 cluster_apps_enabled = true
 sdn_partitions_enabled = true
+interfaces_enabled = true
+
+# NVUE gNMI streaming collector (switches only, disabled by default).
+# Subscribes to gNMI SAMPLE paths and pushes metrics through the DataSink
+# pipeline. PrometheusSink serves the /metrics endpoint; OtlpSink (when
+# configured separately) pushes to an OTel Collector.
+[collectors.nvue.gnmi]
+gnmi_port = 9339
+sample_interval = "5m"
+request_timeout = "30s"
+# gNMI ON_CHANGE subscription for system events
+system_events_enabled = true
+
+[collectors.nvue.gnmi.paths]
+components_enabled = true
 interfaces_enabled = true
 
 # ==============================================================================

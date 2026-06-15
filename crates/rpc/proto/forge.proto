@@ -766,6 +766,9 @@ service Forge {
   // end DPU Remediation APIs
 
   rpc SetPrimaryDpu(SetPrimaryDpuRequest) returns (google.protobuf.Empty);
+  // Make any host interface (DPU or not) the primary / boot interface. This is
+  // the generic form of SetPrimaryDpu, which it deprecates.
+  rpc SetPrimaryInterface(SetPrimaryInterfaceRequest) returns (google.protobuf.Empty);
 
   // Extension service version management
   rpc CreateDpuExtensionService(CreateDpuExtensionServiceRequest) returns (DpuExtensionService);
@@ -1263,6 +1266,7 @@ enum CredentialType {
   BmcForgeAdminByMacAddress = 9;
   NmxM = 10;
   BgpSiteWideLeafPassword = 11;
+  SiteWideNicLockdownIkm = 12;
 }
 
 message CredentialCreationRequest {
@@ -1691,6 +1695,9 @@ message VpcPrefixStatus {
   uint64 total_linknet_segments = 3;
   uint64 available_linknet_segments = 4;
   LifecycleStatus lifecycle = 5;
+
+  // Coarse tenant-facing state derived from lifecycle.state at the server side.
+  TenantState tenant_state = 6;
 }
 
 message VpcPrefixCreationRequest {
@@ -6019,7 +6026,7 @@ message FirmwareUpgradeActivity {
 message NvosUpdateActivity {
   reserved 1;
   reserved "firmware_object_id";
-  // SOT JSON string passed to RMS ApplySwitchSystemImageFromJSON.
+  // SOT JSON string passed to RMS ApplySwitchSystemImage.
   // Required for nvos-update activity.
   string config_json = 2;
   // Used only by the backend for artifact download when config_json is set.
@@ -6933,8 +6940,14 @@ message DpaInterface {
   optional string mlxconfig_profile = 19;
 
   optional string device_description = 20;
+
+  DpaInterfaceType interface_type = 21;
 }
 
+enum DpaInterfaceType {
+  DPA_INTERFACE_TYPE_SVPC = 0;
+  DPA_INTERFACE_TYPE_ASTRA = 1;
+}
 
 message DpaInterfaceCreationRequest {
   common.MachineId machine_id = 1;
@@ -6942,6 +6955,7 @@ message DpaInterfaceCreationRequest {
   string device_type = 3;
   string pci_name = 4;
   optional string device_description = 5;
+  DpaInterfaceType interface_type = 6;
 }
 
 message DpaInterfaceIdList {
@@ -7611,6 +7625,12 @@ message SetPrimaryDpuRequest {
   common.MachineId host_machine_id = 1;
   common.MachineId dpu_machine_id = 2;
   bool reboot=3;
+}
+
+message SetPrimaryInterfaceRequest {
+  common.MachineId host_machine_id = 1;
+  common.MachineInterfaceId interface_id = 2;
+  bool reboot = 3;
 }
 
 // DPU Extension Service Types and Messages

@@ -32,6 +32,9 @@ use carbide_redfish::libredfish::conv::{
     IntoLibredfish, IntoModel, machine_last_reboot_requested_mode,
 };
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use carbide_secrets::credentials::{
+    BmcCredentialType, CredentialKey, CredentialReader, Credentials,
+};
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::vpc::VpcId;
 use chrono::{DateTime, Duration, Utc};
@@ -39,7 +42,6 @@ use config_version::{ConfigVersion, Versioned};
 use db::DatabaseError;
 use db::db_read::PgPoolReader;
 use eyre::eyre;
-use forge_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialReader, Credentials};
 use futures::TryFutureExt;
 use futures_util::FutureExt;
 use health_report::{
@@ -140,6 +142,12 @@ pub const MAX_FIRMWARE_UPGRADE_RETRIES: u32 = 5;
 
 #[cfg(test)]
 pub const MAX_FIRMWARE_UPGRADE_RETRIES: u32 = 2; // Faster for tests
+
+#[cfg(not(test))]
+pub const MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES: u32 = 5;
+
+#[cfg(test)]
+pub const MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES: u32 = 2; // Faster for tests
 
 // Compute the API-side deadline for a scout firmware upgrade from scout's
 // timeout envelope: fixed script download timeout, script execution timeout,
@@ -549,6 +557,18 @@ impl MachineStateHandler {
             state.host_snapshot.id.to_string(),
             &state.aggregate_health,
             &state.host_snapshot.health_reports,
+        );
+
+        // Feed the per-object health classification metric. The registry filters
+        // to the opted-in classifications and emits a series labeled with this
+        // host's id; emitting an empty set clears any prior series once the host
+        // becomes healthy.
+        let in_use = ctx.metrics.in_use_by_tenant.is_some();
+        ctx.services.per_object_metrics_registry.record(
+            "machine",
+            &state.host_snapshot.id.to_string(),
+            &ctx.metrics.health.health_alert_classifications,
+            vec![opentelemetry::KeyValue::new("in_use", in_use.to_string())],
         );
     }
 
@@ -2911,22 +2931,12 @@ async fn handle_dpu_reprovision(
                         }
                     })?;
 
-                    let bmc_ip_address = state
-                        .host_snapshot
-                        .bmc_info
-                        .ip
-                        .clone()
-                        .ok_or_else(|| StateHandlerError::MissingData {
+                    let bmc_ip_address = state.host_snapshot.bmc_info.ip.ok_or_else(|| {
+                        StateHandlerError::MissingData {
                             object_id: state.host_snapshot.id.to_string(),
                             missing: "bmc_ip",
-                        })?
-                        .parse()
-                        .map_err(|e| {
-                            StateHandlerError::GenericError(eyre!(
-                                "parsing the host's BMC IP address failed: {}",
-                                e
-                            ))
-                        })?;
+                        }
+                    })?;
 
                     if let Err(ipmitool_error) = ctx
                         .services
@@ -6339,10 +6349,10 @@ impl StateHandler for InstanceStateHandler {
                                 &mh_snapshot.instance,
                                 &mh_snapshot.host_snapshot.spx_status_observation,
                             ) {
-                                return Ok(StateHandlerOutcome::wait(
-                                        "Waiting for DPA agent(s) to apply network config and report healthy network"
-                                            .to_string()
-                                    ));
+                                return Ok(StateHandlerOutcome::wait(format!(
+                                    "Waiting for DPA agent {dpa_id} to apply network config and report healthy network",
+                                    dpa_id = dpa_interface.id,
+                                )));
                             }
                         }
                     }
@@ -6377,19 +6387,25 @@ impl StateHandler for InstanceStateHandler {
 }
 
 // Gets extension services status from DB, checks if any removed services are fully terminated
-// across all DPUs, if so, remove them from the instance config in the DB(without updating the version).
+// across targeted DPUs, if so, remove them from the instance config in the DB(without updating the version).
 fn get_extension_services_status(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
 ) -> InstanceExtensionServicesStatus {
-    let (_, dpu_id_to_device_map) = mh_snapshot
+    let (_, device_to_id_map) = mh_snapshot
         .host_snapshot
         .get_dpu_device_and_id_mappings()
         .unwrap_or_else(|_| (HashMap::default(), HashMap::default()));
 
-    // Gather instance extension services status from all DPU observations
+    let primary_dpu_machine_id = mh_snapshot.host_snapshot.primary_attached_dpu_machine_id();
+    let used_dpus = instance
+        .config
+        .network
+        .get_used_dpus(&device_to_id_map, primary_dpu_machine_id);
+
+    // Gather instance extension services status from targeted DPUs.
     InstanceExtensionServicesStatus::from_config_and_observations(
-        &dpu_id_to_device_map,
+        &used_dpus,
         Versioned::new(
             &instance.config.extension_services,
             instance.extension_services_config_version,
@@ -7148,6 +7164,7 @@ impl HostUpgradeState {
                             power_drains_needed: *power_drains_needed,
                             delay_until: None,
                             last_power_drain_operation: None,
+                            reset_retry_count: 0,
                         };
                         Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
                             next_reprov_state,
@@ -8226,6 +8243,7 @@ impl HostUpgradeState {
                             power_drains_needed: *power_drains_needed,
                             delay_until: None,
                             last_power_drain_operation: None,
+                            reset_retry_count: 0,
                         };
                         Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
                             reprovision_state,
@@ -8355,6 +8373,7 @@ impl HostUpgradeState {
             power_drains_needed,
             delay_until,
             last_power_drain_operation,
+            reset_retry_count,
         ) = match details {
             HostReprovisionState::ResetForNewFirmware {
                 final_version,
@@ -8363,6 +8382,7 @@ impl HostUpgradeState {
                 power_drains_needed,
                 delay_until,
                 last_power_drain_operation,
+                reset_retry_count,
             } => (
                 final_version,
                 firmware_type,
@@ -8370,6 +8390,7 @@ impl HostUpgradeState {
                 power_drains_needed,
                 delay_until,
                 last_power_drain_operation,
+                reset_retry_count,
             ),
             _ => {
                 return Err(StateHandlerError::GenericError(eyre!(
@@ -8418,6 +8439,7 @@ impl HostUpgradeState {
                             power_drains_needed: Some(*power_drains_needed),
                             delay_until: Some(chrono::Utc::now().timestamp() + delay),
                             last_power_drain_operation: Some(PowerDrainState::Off),
+                            reset_retry_count: *reset_retry_count,
                         };
                         return Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
                             reprovision_state,
@@ -8438,6 +8460,7 @@ impl HostUpgradeState {
                         power_drains_needed: Some(*power_drains_needed),
                         delay_until: Some(chrono::Utc::now().timestamp() + delay),
                         last_power_drain_operation: Some(PowerDrainState::Powercycle),
+                        reset_retry_count: *reset_retry_count,
                     };
                     return Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
                         reprovision_state,
@@ -8456,6 +8479,7 @@ impl HostUpgradeState {
                         power_drains_needed: Some(power_drains_needed - 1),
                         delay_until: Some(chrono::Utc::now().timestamp() + delay),
                         last_power_drain_operation: Some(PowerDrainState::On),
+                        reset_retry_count: *reset_retry_count,
                     };
                     return Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
                         reprovision_state,
@@ -8525,6 +8549,7 @@ impl HostUpgradeState {
             firmware_number: *firmware_number,
             final_version: final_version.to_string(),
             previous_reset_time: Some(Utc::now().timestamp()),
+            reset_retry_count: *reset_retry_count,
         };
         Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
             reprovision_state,
@@ -8540,24 +8565,27 @@ impl HostUpgradeState {
         machine_id: &MachineId,
         scenario: HostFirmwareScenario,
     ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-        let (final_version, firmware_type, firmware_number, previous_reset_time) = match details {
-            HostReprovisionState::NewFirmwareReportedWait {
-                final_version,
-                firmware_type,
-                firmware_number,
-                previous_reset_time,
-            } => (
-                final_version,
-                firmware_type,
-                firmware_number,
-                previous_reset_time,
-            ),
-            _ => {
-                return Err(StateHandlerError::GenericError(eyre!(
-                    "Wrong enum in host_new_firmware_reported_wait"
-                )));
-            }
-        };
+        let (final_version, firmware_type, firmware_number, previous_reset_time, reset_retry_count) =
+            match details {
+                HostReprovisionState::NewFirmwareReportedWait {
+                    final_version,
+                    firmware_type,
+                    firmware_number,
+                    previous_reset_time,
+                    reset_retry_count,
+                } => (
+                    final_version,
+                    firmware_type,
+                    firmware_number,
+                    previous_reset_time,
+                    reset_retry_count,
+                ),
+                _ => {
+                    return Err(StateHandlerError::GenericError(eyre!(
+                        "Wrong enum in host_new_firmware_reported_wait"
+                    )));
+                }
+            };
 
         let Some(endpoint) = find_explored_refreshed_endpoint(state, machine_id, ctx).await? else {
             tracing::debug!("Waiting for site explorer to revisit {machine_id}");
@@ -8615,6 +8643,21 @@ impl HostUpgradeState {
                 && let Some(previous_reset_time) = previous_reset_time
                 && previous_reset_time + 30 * 60 <= Utc::now().timestamp()
             {
+                if *reset_retry_count >= MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES {
+                    let reason = format!(
+                        "Firmware version did not converge after completed update for {firmware_type}: expected {final_version}, found {current_versions:?} after {reset_retry_count} reset retries"
+                    );
+                    tracing::warn!(%machine_id, "{reason}");
+                    return Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
+                        HostReprovisionState::FailedFirmwareUpgrade {
+                            firmware_type: *firmware_type,
+                            report_time: Some(Utc::now()),
+                            reason: Some(reason),
+                        },
+                        state.managed_state.get_host_repro_retry_count(),
+                    )));
+                }
+
                 tracing::info!(
                     "Upgrade for {} {:?} has taken more than 30 minutes to report new version; resetting again.",
                     &endpoint.address,
@@ -8627,6 +8670,7 @@ impl HostUpgradeState {
                     power_drains_needed: None,
                     delay_until: None,
                     last_power_drain_operation: None,
+                    reset_retry_count: *reset_retry_count + 1,
                 };
                 return self
                     .host_reset_for_new_firmware(state, ctx, machine_id, details, scenario)
@@ -9093,7 +9137,7 @@ async fn wait_for_boss_controller_job_to_scheduled(
                 cleanup_context,
             )
         }
-        libredfish::JobState::ScheduledWithErrors | libredfish::JobState::CompletedWithErrors => {
+        _ if job_state.is_error_state() => {
             return handle_boss_controller_job_error(
                 boss_controller_id,
                 iteration.unwrap_or_default(),
@@ -9219,18 +9263,16 @@ async fn wait_for_boss_controller_job_to_complete(
             Ok(StateHandlerOutcome::transition(next_state))
         }
         // The job has failed; handle error
-        libredfish::JobState::ScheduledWithErrors | libredfish::JobState::CompletedWithErrors => {
-            handle_boss_controller_job_error(
-                boss_controller_id,
-                iterations,
-                secure_erase_boss_controller,
-                cleanup_context,
-                StateHandlerError::GenericError(eyre::eyre!(
-                    "job {job_id} will not complete because it is in a failure state: {job_state:#?}",
-                )),
-                mh_snapshot.host_snapshot.state.version.since_state_change(),
-            )
-        }
+        _ if job_state.is_error_state() => handle_boss_controller_job_error(
+            boss_controller_id,
+            iterations,
+            secure_erase_boss_controller,
+            cleanup_context,
+            StateHandlerError::GenericError(eyre::eyre!(
+                "job {job_id} will not complete because it is in a failure state: {job_state:#?}",
+            )),
+            mh_snapshot.host_snapshot.state.version.since_state_change(),
+        ),
         // The job is still running (hopefully...); wait for the job to complete
         _ => Ok(StateHandlerOutcome::wait(format!(
             "waiting for job {job_id} to complete; current state: {job_state:#?}"
@@ -9494,18 +9536,9 @@ async fn do_ipmi_restart(
     let ip: IpAddr = machine
         .bmc_info
         .ip
-        .as_ref()
         .ok_or_else(|| StateHandlerError::MissingData {
             object_id: machine.id.to_string(),
             missing: "bmc_ip",
-        })?
-        .parse()
-        .map_err(|e| {
-            StateHandlerError::GenericError(eyre!(
-                "parsing BMC IP address for {} failed: {}",
-                machine.id,
-                e
-            ))
         })?;
     let credential_key = CredentialKey::BmcCredentials {
         credential_type: BmcCredentialType::BmcRoot {
@@ -10417,8 +10450,7 @@ async fn set_host_boot_order(
                     libredfish::JobState::Completed => {
                         // Job completed successfully, proceed to CheckBootOrder
                     }
-                    libredfish::JobState::ScheduledWithErrors
-                    | libredfish::JobState::CompletedWithErrors => {
+                    _ if job_state.is_error_state() => {
                         tracing::warn!(
                             "SetBootOrder: job {} failed for {} with state {job_state:#?}, transitioning to HandleJobFailure",
                             job_id,

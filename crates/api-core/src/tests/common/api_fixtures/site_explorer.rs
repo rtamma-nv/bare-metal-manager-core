@@ -19,6 +19,7 @@ use std::future::Future;
 use std::iter;
 use std::net::IpAddr;
 
+use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
@@ -29,7 +30,6 @@ use db::{
     DatabaseError, expected_machine as db_expected_machine, power_shelf as db_power_shelf,
     rack as db_rack, switch as db_switch,
 };
-use forge_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
 use futures_util::FutureExt;
 use health_report::HealthReport;
 use model::address_selection_strategy::AddressSelectionStrategy;
@@ -47,6 +47,7 @@ use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
 use model::rack::RackConfig;
 use model::site_explorer::{Chassis, EndpointExplorationReport, EndpointType};
 use model::switch::{NewSwitch, SwitchConfig};
+use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self, HealthReportEntry, InsertMachineHealthReportRequest};
 use rpc::forge_agent_control_response::{Action, LegacyAction};
@@ -59,9 +60,9 @@ use uuid;
 use super::dpu::create_machine_inventory;
 use super::tpm_attestation::{AK_NAME_SERIALIZED, AK_PUB_SERIALIZED, EK_PUB_SERIALIZED};
 use super::{discovery_completed, inject_machine_measurements, network_configured};
-use crate::tests::common::api_fixtures::dpu::DpuConfig;
+use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
+use crate::test_support::mac_address_pool::EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL;
 use crate::tests::common::api_fixtures::host::host_uefi_setup;
-use crate::tests::common::api_fixtures::managed_host::ManagedHostConfig;
 use crate::tests::common::api_fixtures::network_segment::{
     FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY,
     FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY_2, FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY,
@@ -71,7 +72,6 @@ use crate::tests::common::api_fixtures::{
     machine_validation_completed, persist_machine_validation_result, reboot_completed,
     update_machine_validation_run,
 };
-use crate::tests::common::mac_address_pool::EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL;
 use crate::tests::common::rpc_builder::DhcpDiscovery;
 
 async fn ensure_admin_interface_primary(
@@ -297,31 +297,22 @@ impl<'a> MockExploredHost<'a> {
         Ok(self)
     }
 
-    // Create an EndpointExplorationReport for the host and DPUs, and seed them into the
+    // Create EndpointExplorationReports for the host and DPUs, and seed them into the
     // MockEndpointExplorer in this test env. If any of the host BMC or DPU BMC's have not run DHCP
     // yet, they will be skipped (as we won't yet know their IP.)
     pub fn insert_site_exploration_results(mut self) -> eyre::Result<Self> {
-        self.test_env.endpoint_explorer.insert_endpoints(
-            self.managed_host
-                .dpus
-                .iter()
-                .enumerate()
-                .filter_map(|(index, dpu)| {
-                    let mut report: EndpointExplorationReport = dpu.clone().into();
-                    report.generate_machine_id(false).unwrap();
-                    self.dpu_machine_ids
-                        .insert(index.try_into().unwrap(), report.machine_id.unwrap());
-                    Some((*self.dpu_bmc_ips.get(&(index as u8))?, report))
-                })
-                .chain(
-                    iter::once(
-                        self.host_bmc_ip
-                            .map(|ip| (ip, self.managed_host.clone().into())),
-                    )
-                    .flatten(),
-                )
-                .collect(),
-        );
+        let dpu_bmc_ips = self
+            .dpu_bmc_ips
+            .iter()
+            .map(|(idx, ip)| (*idx, *ip))
+            .collect::<Vec<_>>();
+        let results = self
+            .managed_host
+            .exploration_results(self.host_bmc_ip, &dpu_bmc_ips)?;
+        self.dpu_machine_ids.extend(results.dpu_machine_ids());
+        self.test_env
+            .endpoint_explorer
+            .insert_endpoints(results.into_endpoints());
         Ok(self)
     }
 
@@ -1501,6 +1492,58 @@ pub async fn register_expected_machine(
         .expect("Expect expected machine to get registered");
 }
 
+/// Seeds the vault with the BMC root credential for the host's BMC and every
+/// DPU BMC in the config -- required by anything that reaches a BMC through
+/// the real endpoint explorer.
+pub async fn seed_bmc_root_credentials(
+    env: &TestEnv,
+    config: &ManagedHostConfig,
+) -> eyre::Result<()> {
+    for bmc_mac_address in
+        std::iter::once(config.bmc_mac_address).chain(config.dpus.iter().map(|d| d.bmc_mac_address))
+    {
+        env.api
+            .credential_manager
+            .set_credentials(
+                &CredentialKey::BmcCredentials {
+                    credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+                },
+                &Credentials::UsernamePassword {
+                    username: "root".to_string(),
+                    password: "notforprod".to_string(),
+                },
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Ingests a zero-DPU host via site-explorer and stops BEFORE its in-band
+/// NIC's first DHCP lease: the machine exists with predicted interfaces only,
+/// no real `machine_interfaces` rows. Registers the expected machine and
+/// seeds BMC credentials; the caller drives anything past this window.
+pub async fn ingest_zero_dpu_host_awaiting_first_lease<'a>(
+    env: &'a TestEnv,
+    config: ManagedHostConfig,
+) -> eyre::Result<MockExploredHost<'a>> {
+    register_expected_machine(env, &config, None).await;
+    seed_bmc_root_credentials(env, &config).await?;
+
+    Ok(MockExploredHost::new(env, config)
+        .discover_dhcp_host_bmc(|result, _| {
+            assert!(result.is_ok());
+            Ok(())
+        })
+        .await?
+        .insert_site_exploration_results()?
+        .run_site_explorer_iteration()
+        .await
+        .mark_preingestion_complete()
+        .await?
+        .run_site_explorer_iteration()
+        .await)
+}
+
 /// Use this function to make a new managed host with a given number of DPUs, using site-explorer
 /// to ingest it into the database. Returns a MockExploredHost that you can call more methods on
 /// before finishing.
@@ -1518,23 +1561,7 @@ pub async fn new_mock_host(
     register_expected_machine(env, &config, None).await;
 
     // Set BMC credentials in vault
-    for bmc_mac_address in vec![config.bmc_mac_address]
-        .into_iter()
-        .chain(config.dpus.iter().map(|d| d.bmc_mac_address))
-    {
-        env.api
-            .credential_manager
-            .set_credentials(
-                &CredentialKey::BmcCredentials {
-                    credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
-                },
-                &Credentials::UsernamePassword {
-                    username: "root".to_string(),
-                    password: "notforprod".to_string(),
-                },
-            )
-            .await?;
-    }
+    seed_bmc_root_credentials(env, &config).await?;
 
     let dpu_count = config.dpus.len() as u8;
     let mut mock_explored_host = MockExploredHost::new(env, config);
@@ -1936,23 +1963,7 @@ pub async fn new_mock_host_with_dpf(
     register_expected_machine(env, &config, Some(true)).await;
 
     // Set BMC credentials in vault
-    for bmc_mac_address in vec![config.bmc_mac_address]
-        .into_iter()
-        .chain(config.dpus.iter().map(|d| d.bmc_mac_address))
-    {
-        env.api
-            .credential_manager
-            .set_credentials(
-                &CredentialKey::BmcCredentials {
-                    credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
-                },
-                &Credentials::UsernamePassword {
-                    username: "root".to_string(),
-                    password: "notforprod".to_string(),
-                },
-            )
-            .await?;
-    }
+    seed_bmc_root_credentials(env, &config).await?;
 
     let dpu_count = config.dpus.len() as u8;
     let mut mock_explored_host = MockExploredHost::new(env, config);
@@ -2042,7 +2053,7 @@ pub async fn create_expected_switch(
     use model::expected_switch::ExpectedSwitch;
     use model::metadata::Metadata;
 
-    use crate::tests::common::mac_address_pool::EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL;
+    use crate::test_support::mac_address_pool::EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL;
 
     let i = index as usize;
     let switch = ExpectedSwitch {
@@ -2088,6 +2099,7 @@ pub async fn create_expected_switch(
             nvos_mac,
             false,
             AddressSelectionStrategy::NextAvailableIp,
+            None,
         )
         .await
         .map_err(|e| eyre::eyre!("Failed to create NVOS machine interface: {:?}", e))
@@ -2104,6 +2116,7 @@ pub async fn create_expected_switch(
         &result.bmc_mac_address.clone(),
         false,
         AddressSelectionStrategy::NextAvailableIp,
+        None,
     )
     .await
     .map_err(|e| eyre::eyre!("Failed to create BMC machine interface: {:?}", e))
@@ -2132,7 +2145,7 @@ pub async fn create_expected_power_shelves(
     use model::expected_power_shelf::ExpectedPowerShelf;
     use model::metadata::Metadata;
 
-    use crate::tests::common::mac_address_pool::EXPECTED_POWER_SHELF_BMC_MAC_ADDRESS_POOL;
+    use crate::test_support::mac_address_pool::EXPECTED_POWER_SHELF_BMC_MAC_ADDRESS_POOL;
 
     let mut created = Vec::new();
     for i in 0..6 {

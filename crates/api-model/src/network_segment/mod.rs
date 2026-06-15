@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::fmt;
+use std::net::IpAddr;
 use std::str::FromStr;
 
 use carbide_uuid::domain::DomainId;
@@ -22,6 +23,7 @@ use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
+use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{Column, FromRow, Row};
@@ -76,9 +78,9 @@ pub struct NetworkDefinition {
     #[serde(rename = "type")]
     pub segment_type: NetworkDefinitionSegmentType,
     /// CIDR notation
-    pub prefix: String,
+    pub prefix: IpNetwork,
     /// Usually the first IP in the prefix range
-    pub gateway: String,
+    pub gateway: IpAddr,
     /// Typically 9000 for admin network, 1500 for underlay
     pub mtu: i32,
     /// How many addresses to skip before allocating
@@ -91,15 +93,35 @@ pub struct NetworkDefinition {
     /// behavior of Carbide + carbide-dhcp.
     #[serde(default)]
     pub allocation_strategy: AllocationStrategy,
+    /// Set to the name of a VPC to attach this network segment to a VPC on creation. Will fail if
+    /// the VPC is not defined. You probably want to add a vpc with a corresponding name to the
+    /// config via `[vpcs.<name>]` for this to work when data is initially being seeded.
+    pub vpc_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkDefinitionSegmentType {
     Admin,
     Underlay,
     HostInband,
     // Tenant networks are created via the API, not the config file
+}
+
+impl From<NetworkDefinitionSegmentType> for crate::network_segment::NetworkSegmentType {
+    fn from(value: NetworkDefinitionSegmentType) -> Self {
+        match value {
+            NetworkDefinitionSegmentType::Admin => {
+                crate::network_segment::NetworkSegmentType::Admin
+            }
+            NetworkDefinitionSegmentType::Underlay => {
+                crate::network_segment::NetworkSegmentType::Underlay
+            }
+            NetworkDefinitionSegmentType::HostInband => {
+                crate::network_segment::NetworkSegmentType::HostInband
+            }
+        }
+    }
 }
 
 /// Returns the SLA for the current state
@@ -320,12 +342,8 @@ impl NewNetworkSegment {
         value: &NetworkDefinition,
     ) -> Result<Self, ModelError> {
         let prefix = NewNetworkPrefix {
-            prefix: value.prefix.parse().map_err(|_| {
-                ModelError::InvalidArgument(format!("Invalid network prefix: {}", value.prefix))
-            })?,
-            gateway: Some(value.gateway.parse().map_err(|_| {
-                ModelError::InvalidArgument(format!("Invalid gateway address: {}", value.gateway))
-            })?),
+            prefix: value.prefix,
+            gateway: Some(value.gateway),
             num_reserved: value.reserve_first,
         };
         Ok(NewNetworkSegment {
@@ -337,11 +355,7 @@ impl NewNetworkSegment {
             prefixes: vec![prefix],
             vlan_id: None,
             vni: None,
-            segment_type: match value.segment_type {
-                NetworkDefinitionSegmentType::Admin => NetworkSegmentType::Admin,
-                NetworkDefinitionSegmentType::Underlay => NetworkSegmentType::Underlay,
-                NetworkDefinitionSegmentType::HostInband => NetworkSegmentType::HostInband,
-            },
+            segment_type: value.segment_type.into(),
             can_stretch: None,
             allocation_strategy: value.allocation_strategy,
         })
@@ -350,40 +364,257 @@ impl NewNetworkSegment {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{scenarios, value_scenarios};
+
     use super::*;
 
+    fn drain_state() -> NetworkSegmentControllerState {
+        let delete_at: DateTime<Utc> = "2022-12-13T04:41:38Z".parse().unwrap();
+        NetworkSegmentControllerState::Deleting {
+            deletion_state: NetworkSegmentDeletionState::DrainAllocatedIps { delete_at },
+        }
+    }
+
+    fn dbdelete_state() -> NetworkSegmentControllerState {
+        NetworkSegmentControllerState::Deleting {
+            deletion_state: NetworkSegmentDeletionState::DBDelete,
+        }
+    }
+
     #[test]
-    fn serialize_controller_state() {
-        let state = NetworkSegmentControllerState::Provisioning {};
-        let serialized = serde_json::to_string(&state).unwrap();
-        assert_eq!(serialized, "{\"state\":\"provisioning\"}");
-        assert_eq!(
-            serde_json::from_str::<NetworkSegmentControllerState>(&serialized).unwrap(),
-            state
-        );
+    fn controller_state_serializes_to_tagged_json() {
+        scenarios!(
+            run = |state| serde_json::to_string(&state).map_err(drop);
+            "provisioning" {
+                NetworkSegmentControllerState::Provisioning => Yields(r#"{"state":"provisioning"}"#.to_string()),
+            }
 
-        let state = NetworkSegmentControllerState::Ready {};
-        let serialized = serde_json::to_string(&state).unwrap();
-        assert_eq!(serialized, "{\"state\":\"ready\"}");
-        assert_eq!(
-            serde_json::from_str::<NetworkSegmentControllerState>(&serialized).unwrap(),
-            state
-        );
+            "ready" {
+                NetworkSegmentControllerState::Ready => Yields(r#"{"state":"ready"}"#.to_string()),
+            }
 
-        let deletion_time: DateTime<Utc> = "2022-12-13T04:41:38Z".parse().unwrap();
-        let state = NetworkSegmentControllerState::Deleting {
-            deletion_state: NetworkSegmentDeletionState::DrainAllocatedIps {
-                delete_at: deletion_time,
-            },
-        };
-        let serialized = serde_json::to_string(&state).unwrap();
-        assert_eq!(
-            serialized,
-            "{\"state\":\"deleting\",\"deletion_state\":{\"state\":\"drainallocatedips\",\"delete_at\":\"2022-12-13T04:41:38Z\"}}"
+            "deleting / drain allocated ips" {
+                drain_state() => Yields(
+                    r#"{"state":"deleting","deletion_state":{"state":"drainallocatedips","delete_at":"2022-12-13T04:41:38Z"}}"#
+                        .to_string(),
+                ),
+            }
+
+            "deleting / db delete" {
+                dbdelete_state() => Yields(
+                    r#"{"state":"deleting","deletion_state":{"state":"dbdelete"}}"#.to_string(),
+                ),
+            }
         );
-        assert_eq!(
-            serde_json::from_str::<NetworkSegmentControllerState>(&serialized).unwrap(),
-            state
+    }
+
+    #[test]
+    fn controller_state_round_trips_through_json() {
+        scenarios!(
+            run = |state| {
+                let json = serde_json::to_string(&state).map_err(drop)?;
+                serde_json::from_str::<NetworkSegmentControllerState>(&json).map_err(drop)
+            };
+            "provisioning" {
+                NetworkSegmentControllerState::Provisioning => Yields(NetworkSegmentControllerState::Provisioning),
+            }
+
+            "ready" {
+                NetworkSegmentControllerState::Ready => Yields(NetworkSegmentControllerState::Ready),
+            }
+
+            "deleting / drain allocated ips" {
+                drain_state() => Yields(drain_state()),
+            }
+
+            "deleting / db delete" {
+                dbdelete_state() => Yields(dbdelete_state()),
+            }
+        );
+    }
+
+    #[test]
+    fn segment_type_parses_from_db_string() {
+        scenarios!(
+            run = |s| NetworkSegmentType::from_str(s).map_err(drop);
+            "tenant" {
+                "tenant" => Yields(NetworkSegmentType::Tenant),
+            }
+
+            "admin" {
+                "admin" => Yields(NetworkSegmentType::Admin),
+            }
+
+            "tor maps to underlay" {
+                "tor" => Yields(NetworkSegmentType::Underlay),
+            }
+
+            "host_inband" {
+                "host_inband" => Yields(NetworkSegmentType::HostInband),
+            }
+
+            "unknown token" {
+                "bogus" => Fails,
+            }
+
+            "empty string" {
+                "" => Fails,
+            }
+
+            "wrong-case admin" {
+                "Admin" => Fails,
+            }
+
+            "display name underlay, not parse name" {
+                "underlay" => Fails,
+            }
+
+            "whitespace padded" {
+                " tenant " => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn segment_type_parse_error_names_the_input() {
+        scenarios!(
+            run = |(s, tokens)| {
+                let msg = NetworkSegmentType::from_str(s)
+                    .map(|_| String::new())
+                    .unwrap_or_else(|e| e.to_string());
+                Ok::<_, ()>(tokens.iter().all(|t| msg.contains(t)))
+            };
+            "error mentions the offending token" {
+                ("bogus", &["Invalid segment type", "bogus"][..]) => Yields(true),
+            }
+
+            "error mentions an empty token" {
+                ("", &["Invalid segment type"][..]) => Yields(true),
+            }
+        );
+    }
+
+    #[test]
+    fn segment_type_round_trips_through_display_and_parse() {
+        scenarios!(
+            run = |ty| NetworkSegmentType::from_str(&ty.to_string()).map_err(drop);
+            "tenant" {
+                NetworkSegmentType::Tenant => Yields(NetworkSegmentType::Tenant),
+            }
+
+            "admin" {
+                NetworkSegmentType::Admin => Yields(NetworkSegmentType::Admin),
+            }
+
+            "underlay" {
+                NetworkSegmentType::Underlay => Yields(NetworkSegmentType::Underlay),
+            }
+
+            "host_inband" {
+                NetworkSegmentType::HostInband => Yields(NetworkSegmentType::HostInband),
+            }
+        );
+    }
+
+    #[test]
+    fn segment_type_displays_its_db_token() {
+        value_scenarios!(
+            run = |ty| ty.to_string();
+            "tenant" {
+                NetworkSegmentType::Tenant => "tenant".to_string(),
+            }
+
+            "admin" {
+                NetworkSegmentType::Admin => "admin".to_string(),
+            }
+
+            "underlay renders as tor" {
+                NetworkSegmentType::Underlay => "tor".to_string(),
+            }
+
+            "host_inband" {
+                NetworkSegmentType::HostInband => "host_inband".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn is_tenant_is_true_for_tenant_facing_segments() {
+        value_scenarios!(
+            run = |ty| ty.is_tenant();
+            "tenant is tenant-facing" {
+                NetworkSegmentType::Tenant => true,
+            }
+
+            "host_inband is tenant-facing" {
+                NetworkSegmentType::HostInband => true,
+            }
+
+            "admin is not tenant-facing" {
+                NetworkSegmentType::Admin => false,
+            }
+
+            "underlay is not tenant-facing" {
+                NetworkSegmentType::Underlay => false,
+            }
+        );
+    }
+
+    #[test]
+    fn segment_type_converts_from_definition_type() {
+        value_scenarios!(
+            run = NetworkSegmentType::from;
+            "admin" {
+                NetworkDefinitionSegmentType::Admin => NetworkSegmentType::Admin,
+            }
+
+            "underlay" {
+                NetworkDefinitionSegmentType::Underlay => NetworkSegmentType::Underlay,
+            }
+
+            "host_inband" {
+                NetworkDefinitionSegmentType::HostInband => NetworkSegmentType::HostInband,
+            }
+        );
+    }
+
+    #[test]
+    fn allocation_strategy_round_trips_through_json() {
+        scenarios!(
+            run = |s| serde_json::to_string(&s).map_err(drop);
+            "dynamic serializes to its snake-case token" {
+                AllocationStrategy::Dynamic => Yields(r#""dynamic""#.to_string()),
+            }
+
+            "reserved serializes to its snake-case token" {
+                AllocationStrategy::Reserved => Yields(r#""reserved""#.to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn allocation_strategy_defaults_to_dynamic() {
+        value_scenarios!(
+            run = |()| AllocationStrategy::default();
+            "default" {
+                () => AllocationStrategy::Dynamic,
+            }
+        );
+    }
+
+    #[test]
+    fn is_marked_as_deleted_follows_the_deleted_timestamp() {
+        let stamp: DateTime<Utc> = "2022-12-13T04:41:38Z".parse().unwrap();
+        value_scenarios!(
+            run = |deleted| deleted.is_some();
+            "no timestamp means live" {
+                None => false,
+            }
+
+            "timestamp means deleted" {
+                Some(stamp) => true,
+            }
         );
     }
 }

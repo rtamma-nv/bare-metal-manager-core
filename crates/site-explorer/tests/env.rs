@@ -19,10 +19,13 @@ use std::sync::Arc;
 
 use carbide_site_explorer::SiteExplorer;
 use carbide_site_explorer::config::SiteExplorerConfig;
+use carbide_site_explorer::test_support::{MockEndpointExplorer, TestSiteExplorer};
 use carbide_test_harness::network::segment::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
-use carbide_test_harness::test_support::endpoint_explorer::MockEndpointExplorer;
 
+/// Keep this shared env to the setup common to most site-explorer tests.
+/// Tests that need extra domains, segments, or other one-off objects should
+/// create those objects locally instead of adding fields here.
 pub struct Env {
     pub pool: PgPool,
     pub underlay_segment: TestNetworkSegment,
@@ -46,21 +49,27 @@ impl Env {
         self.test_harness.api()
     }
 
-    pub fn new_site_explorer(
-        &self,
-        explorer_config: SiteExplorerConfig,
-        endpoint_explorer: &Arc<MockEndpointExplorer>,
-    ) -> SiteExplorer {
-        SiteExplorer::new(
-            self.api().database_connection.clone(),
-            explorer_config,
-            self.test_harness.test_meter.meter(),
-            endpoint_explorer.clone(),
-            Arc::new(self.api().runtime_config.get_firmware_config()),
-            self.api().common_pools().clone(),
-            self.api().work_lock_manager_handle(),
-            None,
-            self.api().credential_manager().clone(),
-        )
+    pub fn test_site_explorer(&self, explorer_config: SiteExplorerConfig) -> TestSiteExplorer {
+        test_site_explorer(&self.test_harness, explorer_config)
     }
+}
+
+pub fn test_site_explorer(
+    test_harness: &TestHarness,
+    explorer_config: SiteExplorerConfig,
+) -> TestSiteExplorer {
+    let endpoint_explorer = Arc::new(MockEndpointExplorer::default());
+    let api = test_harness.api();
+    let site_explorer = SiteExplorer::new(
+        api.database_connection.clone(),
+        explorer_config,
+        test_harness.test_meter.meter(),
+        endpoint_explorer.clone(),
+        Arc::new(api.runtime_config.get_firmware_config()),
+        api.common_pools().clone(),
+        api.work_lock_manager_handle(),
+        None,
+        api.credential_manager().clone(),
+    );
+    TestSiteExplorer::new(site_explorer, endpoint_explorer)
 }

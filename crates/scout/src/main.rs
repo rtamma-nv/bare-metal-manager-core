@@ -95,7 +95,7 @@ async fn main() -> Result<(), eyre::Report> {
 
     check_if_running_in_qemu().await;
 
-    carbide_host_support::init_logging()?;
+    carbide_host_support::init_logging("nico-scout")?;
 
     tracing::info!("Running as {}...{}", config.mode, config.version);
 
@@ -393,7 +393,9 @@ async fn handle_action(
             } else {
                 Ok(())
             };
-            machine_validation::completed(config, machine_id, &id, None).await?;
+            let machine_validation_error = ret.as_ref().err().map(|err| err.to_string());
+            machine_validation::completed(config, machine_id, &id, machine_validation_error)
+                .await?;
             return ret;
         }
         fac::Action::MlxAction(mlx_action) => {

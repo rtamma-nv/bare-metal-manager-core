@@ -21,6 +21,28 @@ use clap::Parser;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
 #[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Update the data of an existing service:
+    $ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef01234567 \
+    --data '{\"image\":\"my-registry/my-service:2.0\"}'
+
+Rename a service and update its description:
+    $ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef01234567 \
+    --name my-renamed-service --description \"Updated telemetry agent\" \
+    --data '{\"image\":\"my-registry/my-service:2.0\"}'
+
+Rotate the registry pull credentials:
+    $ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef01234567 \
+    --data '{\"image\":\"my-registry/my-service:2.0\"}' --registry-url my-registry.example.com \
+    --username admin --password mynewpassword
+
+Update only if the version counter matches (optimistic concurrency):
+    $ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef01234567 \
+    --data '{\"image\":\"my-registry/my-service:2.0\"}' --if-version-ctr-match 3
+
+")]
 pub struct Args {
     #[clap(short = 'i', long = "id", help = "The extension service ID to update")]
     pub service_id: String,

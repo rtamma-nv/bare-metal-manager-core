@@ -50,8 +50,9 @@ impl From<VpcVirtualizationTypeArg> for ::rpc::forge::VpcVirtualizationType {
 }
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
+EXAMPLES:
 Set virtualizer to FNN on VPC:
-    $ carbide-admin-cli vpc set-virtualizer 12345678-1234-5678-90ab-cdef01234567 fnn
+    $ nico-admin-cli vpc set-virtualizer 12345678-1234-5678-90ab-cdef01234567 fnn
 
 ")]
 pub struct Args {

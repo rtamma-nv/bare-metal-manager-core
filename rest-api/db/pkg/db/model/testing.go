@@ -175,7 +175,14 @@ func TestBuildTenant(t *testing.T, dbSession *db.Session, name string, org strin
 
 	tncfg := TenantConfig{}
 
-	tn, err := tnDAO.CreateFromParams(context.Background(), nil, name, cutil.GetPtr("Test Tenant"), org, cutil.GetPtr(org), &tncfg, user)
+	tn, err := tnDAO.Create(context.Background(), nil, TenantCreateInput{
+		Name:           name,
+		DisplayName:    cutil.GetPtr("Test Tenant"),
+		Org:            org,
+		OrgDisplayName: cutil.GetPtr(org),
+		Config:         &tncfg,
+		CreatedBy:      user.ID,
+	})
 	assert.Nil(t, err)
 
 	return tn
@@ -290,14 +297,20 @@ func TestBuildAllocation(t *testing.T, dbSession *db.Session, name string, st *S
 // TestBuildAllocationConstraint creates a test Allocation Constraint of Instance Type
 func TestBuildAllocationConstraint(t *testing.T, dbSession *db.Session, al *Allocation, it *InstanceType, ipb *IPBlock, constraintValue int, user *User) *AllocationConstraint {
 	var resourceID uuid.UUID
+	resourceType := AllocationResourceTypeInstanceType
 	if it != nil {
 		resourceID = it.ID
 	} else if ipb != nil {
 		resourceID = ipb.ID
+		resourceType = AllocationResourceTypeIPBlock
 	}
 
 	acDAO := NewAllocationConstraintDAO(dbSession)
-	ac, err := acDAO.CreateFromParams(context.Background(), nil, al.ID, AllocationResourceTypeInstanceType, resourceID, AllocationConstraintTypeReserved, constraintValue, nil, user.ID)
+	ac, err := acDAO.Create(context.Background(), nil, AllocationConstraintCreateInput{
+		AllocationID: al.ID, ResourceType: resourceType,
+		ResourceTypeID: resourceID, ConstraintType: AllocationConstraintTypeReserved,
+		ConstraintValue: constraintValue, CreatedBy: user.ID,
+	})
 	assert.Nil(t, err)
 
 	return ac

@@ -17,11 +17,11 @@
 
 use std::sync::Arc;
 
-use carbide_uuid::machine::MachineId;
-use db::{ObjectColumnFilter, Transaction};
-use forge_secrets::credentials::{
+use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
+use carbide_uuid::machine::MachineId;
+use db::{ObjectColumnFilter, Transaction};
 use itertools::Itertools;
 use librms::RmsApi;
 use mac_address::MacAddress;
@@ -246,13 +246,13 @@ impl MachineCreator {
         if let (Some(rack_id), Some(rms_client)) =
             (&expected_machine.data.rack_id, &self.rms_client)
         {
-            let request = librms::protos::rack_manager::GetDeviceInfoByDeviceListRequest {
+            let request = librms::protos::rack_manager::BatchGetNodeDeviceInfoRequest {
                 nodes: Some(librms::protos::rack_manager::NodeSet {
-                    devices: vec![librms::protos::rack_manager::NewNodeInfo {
+                    nodes: vec![librms::protos::rack_manager::NodeInfo {
                         node_id: host_machine_id.to_string(),
                         rack_id: rack_id.to_string(),
                         r#type: Some(librms::protos::rack_manager::NodeType::Compute as i32),
-                        bmc_endpoint: Some(librms::protos::rack_manager::BmcEndpoint {
+                        bmc_endpoint: Some(librms::protos::rack_manager::Endpoint {
                             interface: Some(librms::protos::rack_manager::NetworkInterface {
                                 ip_address: explored_host.host_bmc_ip.to_string(),
                                 mac_address: expected_machine.bmc_mac_address.to_string(),
@@ -270,11 +270,11 @@ impl MachineCreator {
                                     ),
                                 }
                             }),
+                            dangerously_accept_invalid_certs: true,
                         }),
                         ..Default::default()
                     }],
                 }),
-                ..Default::default()
             };
             let (slot_number, tray_index) =
                 crate::fetch_slot_and_tray(rms_client.as_ref(), request).await;
@@ -311,6 +311,18 @@ impl MachineCreator {
         // can't rely on matching the machine_id, as it may have migrated to a stable MachineID
         // already.
         let mac_addresses = host_mac_addresses_for_predicted_machine(report, machine_data);
+
+        // Resolve each MAC's Redfish interface id from the live report up
+        // front (`generate_machine_id` below takes a mutable borrow of the
+        // report that lives for the rest of this function).
+        let report_boot_interface_ids: Vec<(MacAddress, String)> = mac_addresses
+            .iter()
+            .filter_map(|mac| {
+                report
+                    .find_interface_id_for_mac(*mac)
+                    .map(|id| (*mac, id.to_string()))
+            })
+            .collect();
         for mac_address in &mac_addresses {
             if db::machine::find_by_mac_address(txn, mac_address)
                 .await?
@@ -411,11 +423,24 @@ impl MachineCreator {
                     .await?;
                 }
             } else {
+                // Give the predicted interface its boot interface id when
+                // the live report resolves one, so the promoted row starts
+                // with the full boot pair. Retained ids are deliberately
+                // NOT copied here: a prediction has no recorded_at, so a
+                // copy would dodge the `retained_boot_interface_window`
+                // check. The retained pair instead lands on the row at
+                // creation (see `create_with_type`), where the window is
+                // checked at DHCP time.
+                let boot_interface_id = report_boot_interface_ids
+                    .iter()
+                    .find(|(mac, _)| *mac == mac_address)
+                    .map(|(_, id)| id.clone());
                 db::predicted_machine_interface::create(
                     NewPredictedMachineInterface {
                         machine_id,
                         mac_address,
                         expected_network_segment_type: NetworkSegmentType::HostInband,
+                        boot_interface_id,
                     },
                     txn,
                 )
@@ -584,6 +609,7 @@ impl MachineCreator {
                 txn,
                 Some(&dpu_hw_info),
                 explored_dpu.report.machine_id.as_ref().unwrap(),
+                self.config.retained_boot_interface_window,
             )
             .await?;
 

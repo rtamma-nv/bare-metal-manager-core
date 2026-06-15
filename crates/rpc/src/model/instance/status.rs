@@ -71,6 +71,7 @@ impl TryFrom<InstanceStatus> for rpc::InstanceStatus {
 #[allow(clippy::too_many_arguments)]
 pub fn instance_status_from_config_and_observation(
     dpu_id_to_device_map: HashMap<String, Vec<MachineId>>,
+    primary_dpu_machine_id: Option<MachineId>,
     instance_config: Versioned<&InstanceConfig>,
     network_config: Versioned<&InstanceNetworkConfig>,
     ib_config: Versioned<&InstanceInfinibandConfig>,
@@ -89,6 +90,9 @@ pub fn instance_status_from_config_and_observation(
 ) -> Result<InstanceStatus, RpcDataConversionError> {
     let mut instance_config_synced = SyncState::Synced;
 
+    let operator_managed_networking =
+        !network_config.interfaces.is_empty() && network_config.is_host_inband();
+
     for network_obs in observations.network.values() {
         if let Some(version_obs) = network_obs.instance_config_version
             && instance_config.version != version_obs
@@ -102,9 +106,13 @@ pub fn instance_status_from_config_and_observation(
         // If observations.network.instance_config_version was None, then "ignore"
     }
 
+    let used_dpu_ids = network_config
+        .value
+        .get_used_dpus(&dpu_id_to_device_map, primary_dpu_machine_id);
+
     let network =
         model::instance::status::network::InstanceNetworkStatus::from_config_and_observations(
-            dpu_id_to_device_map.clone(),
+            dpu_id_to_device_map,
             network_config,
             &observations.network,
             is_network_config_request_pending,
@@ -117,7 +125,7 @@ pub fn instance_status_from_config_and_observation(
 
     let extension_services =
         model::instance::status::extension_service::InstanceExtensionServicesStatus::from_config_and_observations(
-            &dpu_id_to_device_map,
+            &used_dpu_ids,
             extension_services_config,
             &observations.extension_services,
         );
@@ -162,6 +170,7 @@ pub fn instance_status_from_config_and_observation(
                 instance_config.os.phone_home_enabled,
                 phone_home_last_contact,
                 extension_services_ready,
+                operator_managed_networking,
                 host_health.repair_merge_active(),
             )?,
             true => {
@@ -260,6 +269,7 @@ mod tests {
 
         let status = instance_status_from_config_and_observation(
             HashMap::new(),
+            None,
             Versioned::new(&config, version),
             Versioned::new(&config.network, version),
             Versioned::new(&config.infiniband, version),
@@ -309,6 +319,7 @@ mod tests {
                 SyncState::Synced,
                 false,
                 None,
+                false,
                 false,
                 false,
             )

@@ -233,52 +233,64 @@ impl From<VpcPeering> for rpc::forge::VpcPeering {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::value_scenarios;
+
     use super::*;
 
+    // `VpcSearchFilter::from` is a total conversion, so we project its output to
+    // the fields the originals asserted: name, tenant_org_id, and the label as its
+    // (key, value) pair (None when no label is present).
     #[test]
-    fn vpc_search_filter_from_rpc_all_fields() {
-        let rpc_filter = rpc::forge::VpcSearchFilter {
-            name: Some("my-vpc".to_string()),
-            tenant_org_id: Some("org-123".to_string()),
-            label: Some(rpc::forge::Label {
-                key: "env".to_string(),
-                value: Some("prod".to_string()),
-            }),
-        };
-        let filter = VpcSearchFilter::from(rpc_filter);
-        assert_eq!(filter.name, Some("my-vpc".to_string()));
-        assert_eq!(filter.tenant_org_id, Some("org-123".to_string()));
-        let label = filter.label.unwrap();
-        assert_eq!(label.key, "env");
-        assert_eq!(label.value, Some("prod".to_string()));
-    }
+    fn vpc_search_filter_from_rpc() {
+        type Projected = (
+            Option<String>,
+            Option<String>,
+            Option<(String, Option<String>)>,
+        );
 
-    #[test]
-    fn vpc_search_filter_from_rpc_no_fields() {
-        let rpc_filter = rpc::forge::VpcSearchFilter {
-            name: None,
-            tenant_org_id: None,
-            label: None,
-        };
-        let filter = VpcSearchFilter::from(rpc_filter);
-        assert_eq!(filter.name, None);
-        assert_eq!(filter.tenant_org_id, None);
-        assert!(filter.label.is_none());
-    }
+        value_scenarios!(
+            run = |rpc_filter| {
+                let filter = VpcSearchFilter::from(rpc_filter);
+                let projected: Projected = (
+                    filter.name,
+                    filter.tenant_org_id,
+                    filter.label.map(|l| (l.key, l.value)),
+                );
+                projected
+            };
+            "all fields populated" {
+                rpc::forge::VpcSearchFilter {
+                    name: Some("my-vpc".to_string()),
+                    tenant_org_id: Some("org-123".to_string()),
+                    label: Some(rpc::forge::Label {
+                        key: "env".to_string(),
+                        value: Some("prod".to_string()),
+                    }),
+                } => (
+                    Some("my-vpc".to_string()),
+                    Some("org-123".to_string()),
+                    Some(("env".to_string(), Some("prod".to_string()))),
+                ),
+            }
 
-    #[test]
-    fn vpc_search_filter_from_rpc_label_key_only() {
-        let rpc_filter = rpc::forge::VpcSearchFilter {
-            name: None,
-            tenant_org_id: None,
-            label: Some(rpc::forge::Label {
-                key: "team".to_string(),
-                value: None,
-            }),
-        };
-        let filter = VpcSearchFilter::from(rpc_filter);
-        let label = filter.label.unwrap();
-        assert_eq!(label.key, "team");
-        assert_eq!(label.value, None);
+            "no fields" {
+                rpc::forge::VpcSearchFilter {
+                    name: None,
+                    tenant_org_id: None,
+                    label: None,
+                } => (None, None, None),
+            }
+
+            "label key only" {
+                rpc::forge::VpcSearchFilter {
+                    name: None,
+                    tenant_org_id: None,
+                    label: Some(rpc::forge::Label {
+                        key: "team".to_string(),
+                        value: None,
+                    }),
+                } => (None, None, Some(("team".to_string(), None))),
+            }
+        );
     }
 }

@@ -21,7 +21,6 @@ use carbide_uuid::switch::SwitchId;
 use common::api_fixtures::instance::{
     create_instance_with_nvlink_config, update_instance_nvlink_config,
 };
-use common::api_fixtures::managed_host::{HardwareInfoTemplate, ManagedHostConfig};
 use common::api_fixtures::network_segment::{
     FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY_2, create_network_segment,
 };
@@ -43,16 +42,18 @@ use model::switch::{
     CONTROL_PLANE_STATE_CONFIGURED, FabricManagerState, FabricManagerStatus, NewSwitch,
     SwitchConfig, SwitchControllerState,
 };
+use model::test_support::{HardwareInfoTemplate, ManagedHostConfig};
 use rpc::forge::TenantState;
 use rpc::forge::forge_server::Forge;
 
+use crate::test_support::fixture_config::ManagedHostConfigExt;
+use crate::test_support::mac_address_pool::{
+    EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL, EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL,
+};
 use crate::test_support::network::TEST_SITE_PREFIXES;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::TestEnvOverrides;
 use crate::tests::common::api_fixtures::nvl_logical_partition::NvlLogicalPartitionFixture;
-use crate::tests::common::mac_address_pool::{
-    EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL, EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL,
-};
 
 const SWITCH_BMC_STATIC_IP: std::net::IpAddr =
     std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 1, 50));
@@ -2256,12 +2257,22 @@ async fn seed_switch_endpoint_records(
     .await
     .expect("create expected switch");
 
-    db::machine_interface::preallocate_bmc_machine_interface(txn, bmc_mac, SWITCH_BMC_STATIC_IP)
-        .await
-        .expect("BMC machine interface");
-    db::machine_interface::preallocate_machine_interface(txn, nvos_mac, SWITCH_NVOS_STATIC_IP)
-        .await
-        .expect("NVOS machine interface");
+    db::machine_interface::preallocate_bmc_machine_interface(
+        txn,
+        bmc_mac,
+        SWITCH_BMC_STATIC_IP,
+        None,
+    )
+    .await
+    .expect("BMC machine interface");
+    db::machine_interface::preallocate_machine_interface(
+        txn,
+        nvos_mac,
+        SWITCH_NVOS_STATIC_IP,
+        None,
+    )
+    .await
+    .expect("NVOS machine interface");
 }
 
 async fn create_rack_switch_for_nmxc_simulator(env: &TestEnv, rack_id: &RackId) -> SwitchId {

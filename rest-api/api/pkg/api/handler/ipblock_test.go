@@ -84,7 +84,12 @@ func testIPBlockBuildInfrastructureProvider(t *testing.T, dbSession *cdb.Session
 func testIPBlockBuildTenant(t *testing.T, dbSession *cdb.Session, name string, org string, user *cdbm.User) *cdbm.Tenant {
 	tnDAO := cdbm.NewTenantDAO(dbSession)
 
-	tn, err := tnDAO.CreateFromParams(context.Background(), nil, name, cutil.GetPtr("Test Tenant"), org, nil, nil, user)
+	tn, err := tnDAO.Create(context.Background(), nil, cdbm.TenantCreateInput{
+		Name:        name,
+		DisplayName: cutil.GetPtr("Test Tenant"),
+		Org:         org,
+		CreatedBy:   user.ID,
+	})
 	assert.Nil(t, err)
 
 	return tn
@@ -200,7 +205,11 @@ func testIPBlockBuildAllocation(t *testing.T, dbSession *cdb.Session, st *cdbm.S
 func testIPBlockBuildAllocationConstraint(t *testing.T, dbSession *cdb.Session, allocationID uuid.UUID, resourceType string, resourceTypeID uuid.UUID, constraintType string, constraintValue int, derivedResourceID *uuid.UUID, createdBy uuid.UUID) *cdbm.AllocationConstraint {
 	alcDAO := cdbm.NewAllocationConstraintDAO(dbSession)
 
-	alc, err := alcDAO.CreateFromParams(context.Background(), nil, allocationID, resourceType, resourceTypeID, constraintType, constraintValue, derivedResourceID, createdBy)
+	alc, err := alcDAO.Create(context.Background(), nil, cdbm.AllocationConstraintCreateInput{
+		AllocationID: allocationID, ResourceType: resourceType, ResourceTypeID: resourceTypeID,
+		ConstraintType: constraintType, ConstraintValue: constraintValue,
+		DerivedResourceID: derivedResourceID, CreatedBy: createdBy,
+	})
 	assert.Nil(t, err)
 
 	return alc

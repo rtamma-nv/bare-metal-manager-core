@@ -20,6 +20,25 @@ use clap::Parser;
 use super::super::common::ExtensionServiceType;
 
 #[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Show all extension services:
+    $ nico-admin-cli extension-service show
+
+Show one extension service by ID:
+    $ nico-admin-cli extension-service show --id 12345678-1234-5678-90ab-cdef01234567
+
+Filter by service type:
+    $ nico-admin-cli extension-service show --type kubernetes-pod
+
+Filter by service name:
+    $ nico-admin-cli extension-service show --name my-service
+
+Filter by tenant organization ID:
+    $ nico-admin-cli extension-service show --tenant-organization-id fds34511233a
+
+")]
 pub struct Args {
     #[clap(
         short = 'i',

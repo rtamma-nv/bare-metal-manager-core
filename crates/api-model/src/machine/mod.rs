@@ -273,7 +273,11 @@ impl From<ManagedHostStateSnapshotError> for sqlx::Error {
 ///    so it's on the caller to figure out. What this usually means is the
 ///    caller passes `boot_interface_mac: None` to machine_setup, and then
 ///    subsequent logic flows from there (e.g. ::NoDpu handling).
-fn pick_boot_interface(
+///
+/// Public because admin boot-interface resolution (api-core) applies the same
+/// selection to a machine's interface rows when targeting a host by BMC
+/// endpoint.
+pub fn pick_boot_interface(
     interfaces: &[MachineInterfaceSnapshot],
 ) -> Option<&MachineInterfaceSnapshot> {
     // The primary wins!
@@ -293,18 +297,13 @@ fn pick_boot_interface_mac(
     pick_boot_interface(interfaces).map(|x| x.mac_address)
 }
 
-/// Resolves the boot interface to a fully-populated [`MachineBootInterface`]
-/// (MAC + Redfish interface id) from the picked interface's own row. Split out
-/// like `pick_boot_interface_mac` so it's unit-testable without a full snapshot.
+/// Resolves the boot interface to the picked interface's own
+/// [`MachineBootInterface`]. Split out like `pick_boot_interface_mac` so it's
+/// unit-testable without a full snapshot.
 fn pick_boot_interface_pair(
     interfaces: &[MachineInterfaceSnapshot],
 ) -> Option<MachineBootInterface> {
-    pick_boot_interface(interfaces).and_then(|interface| {
-        MachineBootInterface::from_parts(
-            Some(interface.mac_address),
-            interface.boot_interface_id.clone(),
-        )
-    })
+    pick_boot_interface(interfaces).and_then(MachineInterfaceSnapshot::boot_interface)
 }
 
 impl ManagedHostStateSnapshot {
@@ -1012,8 +1011,6 @@ impl Machine {
     pub fn bmc_addr(&self) -> Option<SocketAddr> {
         self.bmc_info
             .ip
-            .as_ref()
-            .and_then(|ip| ip.parse().ok())
             .map(|ip| SocketAddr::new(ip, self.bmc_info.port.unwrap_or(443)))
     }
 
@@ -1069,6 +1066,13 @@ impl Machine {
             "No device instance found for dpu {} in machine {}",
             dpu_machine_id, self.id
         )))
+    }
+
+    pub fn primary_attached_dpu_machine_id(&self) -> Option<MachineId> {
+        self.interfaces
+            .iter()
+            .find(|iface| iface.primary_interface)
+            .and_then(|iface| iface.attached_dpu_machine_id)
     }
 
     pub fn get_dpu_device_and_id_mappings(&self) -> ModelResult<DpuDeviceMappings> {
@@ -1477,12 +1481,16 @@ pub enum HostReprovisionState {
         power_drains_needed: Option<u32>,
         delay_until: Option<i64>,
         last_power_drain_operation: Option<PowerDrainState>,
+        #[serde(default)]
+        reset_retry_count: u32,
     },
     NewFirmwareReportedWait {
         final_version: String,
         firmware_type: FirmwareComponentType,
         firmware_number: Option<u32>,
         previous_reset_time: Option<i64>,
+        #[serde(default)]
+        reset_retry_count: u32,
     },
     FailedFirmwareUpgrade {
         firmware_type: FirmwareComponentType,
@@ -2367,6 +2375,13 @@ pub struct MachineInterfaceSnapshot {
 }
 
 impl MachineInterfaceSnapshot {
+    /// This row's [`MachineBootInterface`]: its MAC plus its captured Redfish
+    /// interface id. `None` until site-explorer has recorded the id from an
+    /// exploration report.
+    pub fn boot_interface(&self) -> Option<MachineBootInterface> {
+        MachineBootInterface::for_mac(self.mac_address, self.boot_interface_id.clone())
+    }
+
     pub fn mock_with_mac(mac_address: MacAddress) -> Self {
         Self {
             id: MachineInterfaceId::from(uuid::Uuid::nil()),
@@ -2847,113 +2862,139 @@ pub fn dpf_based_dpu_provisioning_possible(
 mod tests {
     use std::str::FromStr;
 
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+
     use super::*;
 
+    // Deserializing a `FailureDetails` JSON blob: the parsed value must match the
+    // expected struct (cause + failed_at + source). The type is PartialEq, so we
+    // yield the whole struct.
     #[test]
-    fn test_json_deserialize_no_error() {
-        let serialized = r#"{"cause": "noerror", "source": "noerror", "failed_at": "2023-07-31T11:26:18.261228950Z"}"#;
-        let deserialized: FailureDetails = serde_json::from_str(serialized).unwrap();
-
-        let expected_time =
-            chrono::DateTime::parse_from_rfc3339("2023-07-31T11:26:18.261228950+00:00").unwrap();
-        assert_eq!(FailureCause::NoError, deserialized.cause);
-        assert_eq!(expected_time, deserialized.failed_at);
-    }
-
-    #[test]
-    fn test_json_deserialize_nvme_error() {
-        let serialized = r#"{"cause": {"nvmecleanfailed":{"err": "error1"}},  "source": "noerror","failed_at": "2023-07-31T11:26:18.261228950Z"}"#;
-        let deserialized: FailureDetails = serde_json::from_str(serialized).unwrap();
-
-        let expected_time =
-            chrono::DateTime::parse_from_rfc3339("2023-07-31T11:26:18.261228950+00:00").unwrap();
-        assert_eq!(
-            FailureCause::NVMECleanFailed {
-                err: "error1".to_string()
-            },
-            deserialized.cause
-        );
-        assert_eq!(expected_time, deserialized.failed_at);
-    }
-
-    #[test]
-    fn test_json_deserialize_reprovisioning_state() {
-        let serialized = r#"{"state":"dpureprovision","dpu_states":{"states":{"fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng":"firmwareupgrade"}}}"#;
-        let deserialized: ManagedHostState = serde_json::from_str(serialized).unwrap();
-        assert_eq!(
-            deserialized,
-            ManagedHostState::DPUReprovision {
-                dpu_states: DpuReprovisionStates {
-                    states: HashMap::from([(
-                        MachineId::from_str(
-                            "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng"
-                        )
-                        .unwrap(),
-                        ReprovisionState::FirmwareUpgrade
-                    )])
-                }
+    fn test_json_deserialize_failure_details() {
+        let failed_at = chrono::DateTime::parse_from_rfc3339("2023-07-31T11:26:18.261228950+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        scenarios!(
+            run = |s| serde_json::from_str::<FailureDetails>(s).map_err(drop);
+            "no error" {
+                r#"{"cause": "noerror", "source": "noerror", "failed_at": "2023-07-31T11:26:18.261228950Z"}"# => Yields(FailureDetails {
+                    cause: FailureCause::NoError,
+                    failed_at,
+                    source: FailureSource::NoError,
+                }),
             }
-        );
 
-        assert_eq!(deserialized.to_string(), "Reprovisioning/FirmwareUpgrade");
-    }
-
-    #[test]
-    fn test_json_deserialize_reprovisioning_state_for_instance() {
-        let serialized = r#"{"state":"assigned","instance_state":{"state":"dpureprovision","dpu_states":{"states":{"fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng":"firmwareupgrade"}}}}"#;
-
-        let deserialized: ManagedHostState = serde_json::from_str(serialized).unwrap();
-
-        assert_eq!(
-            deserialized,
-            ManagedHostState::Assigned {
-                instance_state: InstanceState::DPUReprovision {
-                    dpu_states: DpuReprovisionStates {
-                        states: HashMap::from([(
-                            MachineId::from_str(
-                                "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng"
-                            )
-                            .unwrap(),
-                            ReprovisionState::FirmwareUpgrade
-                        )])
-                    }
-                },
-            }
-        );
-
-        assert_eq!(
-            deserialized.to_string(),
-            "Assigned/Reprovision/FirmwareUpgrade"
-        );
-    }
-
-    #[test]
-    fn test_json_deserialize_bootingwithdiscoveryimage_state_for_instance() {
-        let serialized =
-            r#"{"state":"assigned","instance_state":{"state":"bootingwithdiscoveryimage"}}"#;
-        let deserialized: ManagedHostState = serde_json::from_str(serialized).unwrap();
-
-        assert_eq!(
-            deserialized,
-            ManagedHostState::Assigned {
-                instance_state: InstanceState::BootingWithDiscoveryImage {
-                    retry: RetryInfo { count: 0 }
-                },
+            "nvme clean failed" {
+                r#"{"cause": {"nvmecleanfailed":{"err": "error1"}},  "source": "noerror","failed_at": "2023-07-31T11:26:18.261228950Z"}"# => Yields(FailureDetails {
+                    cause: FailureCause::NVMECleanFailed {
+                        err: "error1".to_string(),
+                    },
+                    failed_at,
+                    source: FailureSource::NoError,
+                }),
             }
         );
     }
 
+    // Reprovisioning states deserialize to the expected `ManagedHostState` AND
+    // render the expected `Display` string; we yield the (state, display) pair so
+    // both assertions ride along.
     #[test]
-    fn test_json_deserialize_bootingwithdiscoveryimage_state_with_retry_for_instance() {
-        let serialized = r#"{"state":"assigned","instance_state":{"state":"bootingwithdiscoveryimage", "retry":{"count": 10}}}"#;
-        let deserialized: ManagedHostState = serde_json::from_str(serialized).unwrap();
+    fn test_json_deserialize_reprovisioning_states() {
+        let machine_id =
+            MachineId::from_str("fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng")
+                .unwrap();
+        scenarios!(
+            run = |s| {
+                serde_json::from_str::<ManagedHostState>(s)
+                    .map(|state| (state.clone(), state.to_string()))
+                    .map_err(drop)
+            };
+            "dpu reprovision firmware upgrade" {
+                r#"{"state":"dpureprovision","dpu_states":{"states":{"fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng":"firmwareupgrade"}}}"# => Yields((
+                    ManagedHostState::DPUReprovision {
+                        dpu_states: DpuReprovisionStates {
+                            states: HashMap::from([(
+                                machine_id,
+                                ReprovisionState::FirmwareUpgrade,
+                            )]),
+                        },
+                    },
+                    "Reprovisioning/FirmwareUpgrade".to_string(),
+                )),
+            }
 
-        assert_eq!(
-            deserialized,
-            ManagedHostState::Assigned {
-                instance_state: InstanceState::BootingWithDiscoveryImage {
-                    retry: RetryInfo { count: 10 }
-                }
+            "assigned dpu reprovision firmware upgrade" {
+                r#"{"state":"assigned","instance_state":{"state":"dpureprovision","dpu_states":{"states":{"fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng":"firmwareupgrade"}}}}"# => Yields((
+                    ManagedHostState::Assigned {
+                        instance_state: InstanceState::DPUReprovision {
+                            dpu_states: DpuReprovisionStates {
+                                states: HashMap::from([(
+                                    machine_id,
+                                    ReprovisionState::FirmwareUpgrade,
+                                )]),
+                            },
+                        },
+                    },
+                    "Assigned/Reprovision/FirmwareUpgrade".to_string(),
+                )),
+            }
+        );
+    }
+
+    // The remaining `ManagedHostState` JSON blobs each deserialize to a specific
+    // variant; the parsed value (PartialEq) is the whole assertion.
+    #[test]
+    fn test_json_deserialize_managed_host_states() {
+        scenarios!(
+            run = |s| serde_json::from_str::<ManagedHostState>(s).map_err(drop);
+            "assigned booting with discovery image, default retry" {
+                r#"{"state":"assigned","instance_state":{"state":"bootingwithdiscoveryimage"}}"# => Yields(ManagedHostState::Assigned {
+                    instance_state: InstanceState::BootingWithDiscoveryImage {
+                        retry: RetryInfo { count: 0 },
+                    },
+                }),
+            }
+
+            "assigned booting with discovery image, explicit retry" {
+                r#"{"state":"assigned","instance_state":{"state":"bootingwithdiscoveryimage", "retry":{"count": 10}}}"# => Yields(ManagedHostState::Assigned {
+                    instance_state: InstanceState::BootingWithDiscoveryImage {
+                        retry: RetryInfo { count: 10 },
+                    },
+                }),
+            }
+
+            "host init polling bios setup, default retry" {
+                r#"{"state":"hostinit","machine_state":{"state":"pollingbiossetup"}}"# => Yields(ManagedHostState::HostInit {
+                    machine_state: MachineState::PollingBiosSetup { retry_count: 0 },
+                }),
+            }
+
+            "host init polling bios setup, explicit retry count" {
+                r#"{"state":"hostinit","machine_state":{"state":"pollingbiossetup","retry_count":2}}"# => Yields(ManagedHostState::HostInit {
+                    machine_state: MachineState::PollingBiosSetup { retry_count: 2 },
+                }),
+            }
+
+            "assigned host platform configuration polling bios setup (legacy)" {
+                r#"{"state":"assigned","instance_state":{"state":"hostplatformconfiguration","platform_config_state":{"state":"pollingbiossetup"}}}"# => Yields(ManagedHostState::Assigned {
+                    instance_state: InstanceState::HostPlatformConfiguration {
+                        platform_config_state:
+                            HostPlatformConfigurationState::PollingBiosSetup { retry_count: 0 },
+                    },
+                }),
+            }
+
+            "host init waiting for lockdown" {
+                r#"{"state":"hostinit","machine_state":{"state":"waitingforlockdown","lockdown_info":{"state":"setlockdown","mode":"enable"}}}"# => Yields(ManagedHostState::HostInit {
+                    machine_state: MachineState::WaitingForLockdown {
+                        lockdown_info: LockdownInfo {
+                            state: LockdownState::SetLockdown,
+                            mode: LockdownMode::Enable,
+                        },
+                    },
+                }),
             }
         );
     }
@@ -2973,113 +3014,57 @@ mod tests {
         ));
     }
 
+    // Current `DpfState` tags deserialize to the expected variant and survive a
+    // serialize/deserialize round-trip; the unknown-tag rows verify the lenient
+    // fall-back to `DpfState::Unknown`. We yield the (parsed, round-tripped) pair
+    // so both the direct parse and the round-trip are asserted.
     #[test]
-    fn test_json_deserialize_platformconfig_machine_handler() {
-        // Test polling BIOS setup state
-        let serialized = r#"{"state":"hostinit","machine_state":{"state":"pollingbiossetup"}}"#;
-        let deserialized: ManagedHostState = serde_json::from_str(serialized).unwrap();
-
-        assert_eq!(
-            deserialized,
-            ManagedHostState::HostInit {
-                machine_state: MachineState::PollingBiosSetup { retry_count: 0 },
+    fn test_dpf_state_deserialize_and_roundtrip() {
+        scenarios!(
+            run = |s| {
+                let parsed: DpfState = serde_json::from_str(s).map_err(drop)?;
+                let serialized = serde_json::to_string(&parsed).map_err(drop)?;
+                let roundtrip: DpfState = serde_json::from_str(&serialized).map_err(drop)?;
+                Ok::<_, ()>((parsed, roundtrip))
+            };
+            "provisioning" {
+                r#"{"dpfstate":"provisioning"}"# => Yields((DpfState::Provisioning, DpfState::Provisioning)),
             }
-        );
-    }
 
-    #[test]
-    fn test_json_deserialize_polling_bios_setup_with_retry_count() {
-        let serialized =
-            r#"{"state":"hostinit","machine_state":{"state":"pollingbiossetup","retry_count":2}}"#;
-        let deserialized: ManagedHostState = serde_json::from_str(serialized).unwrap();
-
-        assert_eq!(
-            deserialized,
-            ManagedHostState::HostInit {
-                machine_state: MachineState::PollingBiosSetup { retry_count: 2 },
+            "waiting for ready, no phase detail" {
+                r#"{"dpfstate":"waitingforready"}"# => Yields((
+                    DpfState::WaitingForReady { phase_detail: None },
+                    DpfState::WaitingForReady { phase_detail: None },
+                )),
             }
-        );
-    }
 
-    #[test]
-    fn test_json_deserialize_host_platform_configuration_polling_bios_setup_legacy() {
-        let serialized = r#"{"state":"assigned","instance_state":{"state":"hostplatformconfiguration","platform_config_state":{"state":"pollingbiossetup"}}}"#;
-        let deserialized: ManagedHostState = serde_json::from_str(serialized).unwrap();
-
-        assert_eq!(
-            deserialized,
-            ManagedHostState::Assigned {
-                instance_state: InstanceState::HostPlatformConfiguration {
-                    platform_config_state: HostPlatformConfigurationState::PollingBiosSetup {
-                        retry_count: 0,
+            "waiting for ready, with phase detail" {
+                r#"{"dpfstate":"waitingforready","phase_detail":"some-detail"}"# => Yields((
+                    DpfState::WaitingForReady {
+                        phase_detail: Some("some-detail".to_string()),
                     },
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn test_json_deserialize_lockdown_states() {
-        // Test Lockdown state
-        let serialized = r#"{"state":"hostinit","machine_state":{"state":"waitingforlockdown","lockdown_info":{"state":"setlockdown","mode":"enable"}}}"#;
-        let deserialized: ManagedHostState = serde_json::from_str(serialized).unwrap();
-
-        assert_eq!(
-            deserialized,
-            ManagedHostState::HostInit {
-                machine_state: MachineState::WaitingForLockdown {
-                    lockdown_info: LockdownInfo {
-                        state: LockdownState::SetLockdown,
-                        mode: LockdownMode::Enable,
+                    DpfState::WaitingForReady {
+                        phase_detail: Some("some-detail".to_string()),
                     },
-                },
+                )),
+            }
+
+            "device ready" {
+                r#"{"dpfstate":"deviceready"}"# => Yields((DpfState::DeviceReady, DpfState::DeviceReady)),
+            }
+
+            "reprovisioning" {
+                r#"{"dpfstate":"reprovisioning"}"# => Yields((DpfState::Reprovisioning, DpfState::Reprovisioning)),
+            }
+
+            "unknown tag falls back to Unknown" {
+                r#"{"dpfstate":"somethingold"}"# => Yields((DpfState::Unknown, DpfState::Unknown)),
+            }
+
+            "bogus tag with extra field falls back to Unknown" {
+                r#"{"dpfstate":"bogus","extra":"field"}"# => Yields((DpfState::Unknown, DpfState::Unknown)),
             }
         );
-    }
-
-    /// Current tags deserialize to the correct variant and round-trip.
-    #[test]
-    fn test_dpf_state_deserialize_current_tags_and_roundtrip() {
-        for (json_tag, expected) in [
-            (r#"{"dpfstate":"provisioning"}"#, DpfState::Provisioning),
-            (
-                r#"{"dpfstate":"waitingforready"}"#,
-                DpfState::WaitingForReady { phase_detail: None },
-            ),
-            (
-                r#"{"dpfstate":"waitingforready","phase_detail":"some-detail"}"#,
-                DpfState::WaitingForReady {
-                    phase_detail: Some("some-detail".to_string()),
-                },
-            ),
-            (r#"{"dpfstate":"deviceready"}"#, DpfState::DeviceReady),
-            (r#"{"dpfstate":"reprovisioning"}"#, DpfState::Reprovisioning),
-        ] {
-            let parsed: DpfState = serde_json::from_str(json_tag).unwrap();
-            assert_eq!(
-                parsed, expected,
-                "tag {} should deserialize to {:?}",
-                json_tag, expected
-            );
-            let serialized = serde_json::to_string(&parsed).unwrap();
-            let roundtrip: DpfState = serde_json::from_str(&serialized).unwrap();
-            assert_eq!(
-                roundtrip, expected,
-                "round-trip for {:?} must preserve value",
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn test_dpf_state_unknown_variant_falls_back() {
-        for json in [
-            r#"{"dpfstate":"somethingold"}"#,
-            r#"{"dpfstate":"bogus","extra":"field"}"#,
-        ] {
-            let parsed: DpfState = serde_json::from_str(json).unwrap();
-            assert_eq!(parsed, DpfState::Unknown);
-        }
     }
 
     fn alert_with_classifications(
@@ -3405,26 +3390,39 @@ mod tests {
         assert!(!profile.disable_lockdown);
     }
 
+    // A `HostProfile` serializes to the expected JSON and deserializes back to an
+    // equal value. We yield the (serialized json, round-tripped profile) pair so
+    // the exact serialized form and the round-trip equality are both asserted.
     #[test]
-    fn host_profile_serde_round_trip_lockdown_true() {
-        let profile = HostProfile {
-            disable_lockdown: true,
-        };
-        let json = serde_json::to_string(&profile).unwrap();
-        assert_eq!(json, r#"{"disable_lockdown":true}"#);
-        let back: HostProfile = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, profile);
-    }
+    fn host_profile_serde_round_trip() {
+        scenarios!(
+            run = |profile| {
+                let json = serde_json::to_string(&profile).map_err(drop)?;
+                let back: HostProfile = serde_json::from_str(&json).map_err(drop)?;
+                Ok::<_, ()>((json, back))
+            };
+            "lockdown disabled (true)" {
+                HostProfile {
+                    disable_lockdown: true,
+                } => Yields((
+                    r#"{"disable_lockdown":true}"#.to_string(),
+                    HostProfile {
+                        disable_lockdown: true,
+                    },
+                )),
+            }
 
-    #[test]
-    fn host_profile_serde_round_trip_lockdown_false() {
-        let profile = HostProfile {
-            disable_lockdown: false,
-        };
-        let json = serde_json::to_string(&profile).unwrap();
-        assert_eq!(json, r#"{"disable_lockdown":false}"#);
-        let back: HostProfile = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, profile);
+            "lockdown enabled (false)" {
+                HostProfile {
+                    disable_lockdown: false,
+                } => Yields((
+                    r#"{"disable_lockdown":false}"#.to_string(),
+                    HostProfile {
+                        disable_lockdown: false,
+                    },
+                )),
+            }
+        );
     }
 
     #[test]

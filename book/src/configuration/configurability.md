@@ -187,7 +187,7 @@ explicitly enabled in the TOML.
 | `[dsx_exchange_event_bus]` | MQTT event bus for managed-host state and BMS metadata | Requires MQTT broker. Pairs with the `nico-dsx-exchange-consumer` subchart. |
 | `[fnn]` | L3 VPC overlay networking (VXLAN) | Requires `routing_profiles` and route targets. |
 | `[spdm]` | SPDM hardware attestation (NRAS-based secure boot) | |
-| `[machine_identity]` | SPIFFE JWT-SVID issuance for tenant DPU identity | Per-org JWT signing. |
+| `[machine_identity]` | SPIFFE JWT-SVID issuance for machine (host) identity | Per-org JWT signing. See [Day 0 Machine Identity](../../../docs/getting-started/installation-options/day0-machine-identity.md) and [Machine Identity (Day 1)](../../../docs/configuration/machine_identity.md). |
 | `[measured_boot_collector]` | TPM-based attestation metrics | |
 | `[machine_validation_config]` | Pre-ingestion validation tests | |
 | `[component_manager]` | NvLink switch and power shelf management | |
@@ -689,8 +689,8 @@ it with the rack-level state machine. See
 The NICo REST stack (separate helm release named `nico-rest`, in the
 `nico-rest` namespace) sits on top of NICo Core and provides the public
 REST API, workflow orchestration, optional Keycloak IdP, and the
-per-site agent. Its source repo is
-[`infra-controller-rest`](https://github.com/NVIDIA/ncx-infra-controller-rest);
+per-site agent. Its source lives in the
+[`rest-api/`](https://github.com/NVIDIA/infra-controller/tree/main/rest-api) tree;
 this guide covers only the *site-side* configuration knobs.
 
 ### nico-rest helm release — `helm-prereqs/values/nico-rest.yaml`
@@ -732,7 +732,7 @@ Temporal is deployed by `setup.sh` Phase 7f using the upstream Temporal
 helm chart with mTLS enabled. The mTLS issuer (`nico-rest-ca-issuer`) is
 installed in Phase 7b. Operators usually don't touch Temporal config
 directly; see the temporal subchart values in
-[`infra-controller-rest/helm/charts/temporal/values.yaml`](https://github.com/NVIDIA/ncx-infra-controller-rest)
+[`rest-api/temporal-helm/temporal/values.yaml`](https://github.com/NVIDIA/infra-controller/tree/main/rest-api/temporal-helm/temporal)
 if you need to tune retention or task queue counts.
 
 ### Keycloak (dev IdP)
@@ -814,7 +814,7 @@ also re-applies operator-chart defaults that may not match your
 production tuning.
 
 For the REST stack the equivalent is `helm upgrade nico-rest …` against
-`infra-controller-rest/helm/charts/nico-rest`.
+`rest-api/helm/charts/nico-rest`.
 
 See [`helm/README.md` → Upgrading](../../../helm/README.md#upgrading) for
 the diff-then-apply pattern.
@@ -1054,7 +1054,7 @@ on or off.
 | FNN (L3 VPC overlay) | siteConfig | `[fnn]` present | off | Tenant VPC networking via VXLAN; needs `routing_profiles` and route targets. |
 | Attestation | siteConfig | `attestation_enabled = true` | off | TPM-based machine attestation; adds a `Measuring` state before `Ready`. |
 | Measured Boot Metrics | siteConfig | `[measured_boot_collector].enabled` | off | Exporter for TPM-based attestation metrics. |
-| Machine Identity (SPIFFE JWT-SVID) | siteConfig | `[machine_identity].enabled` | off | Per-org JWT signing for tenant DPU identity tokens. |
+| Machine Identity (SPIFFE JWT-SVID) | siteConfig | `[machine_identity].enabled` | off | Per-org JWT signing for machine identity tokens. See [Day 0](../../../docs/getting-started/installation-options/day0-machine-identity.md) and [Day 1](../../../docs/configuration/machine_identity.md) docs. |
 | Machine Validation | siteConfig | `[machine_validation_config].enabled` | off | Pre-ingestion validation tests. |
 | SPDM | siteConfig | `[spdm].enabled` | off | Hardware attestation via NRAS. |
 | Rack Management | siteConfig | `rack_management_enabled = true` | off | Standalone infrastructure manager mode (GB200/GB300/VR144). |

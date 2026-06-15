@@ -19,6 +19,17 @@ use carbide_uuid::machine::MachineId;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Start on-demand validation for a machine:
+    $ nico-admin-cli machine-validation on-demand start --machine 12345678-1234-5678-90ab-cdef01234567
+
+Start with a restricted set of allowed tests, including unverified:
+    $ nico-admin-cli machine-validation on-demand start --machine 12345678-1234-5678-90ab-cdef01234567 \
+    --allowed-tests gpu_bandwidth --run-unverified-tests
+
+")]
 pub enum Args {
     #[clap(about = "Start on demand machine validation")]
     Start(OnDemandOptions),
@@ -39,8 +50,8 @@ pub struct OnDemandOptions {
     #[clap(long, help = "Allowed tests")]
     pub allowed_tests: Option<Vec<String>>,
 
-    #[clap(long, default_value = "false", help = "Run not verfified tests")]
-    pub run_unverfied_tests: bool,
+    #[clap(long, default_value = "false", help = "Run unverified tests")]
+    pub run_unverified_tests: bool,
 
     #[clap(long, help = "Contexts")]
     pub contexts: Option<Vec<String>>,

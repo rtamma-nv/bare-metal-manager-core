@@ -23,12 +23,14 @@ use forge::forge_server::Forge;
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
 use model::machine::{ManagedHostState, ManagedHostStateSnapshot};
+use model::test_support::ManagedHostConfig;
 use rpc::{Metadata, forge};
 
 use crate::cfg::file::{FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry};
+use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
+use crate::test_support::mac_address_pool::HOST_NON_DPU_MAC_ADDRESS_POOL;
 use crate::tests::common;
 use crate::tests::common::api_fixtures;
-use crate::tests::common::api_fixtures::managed_host::ManagedHostConfig;
 use crate::tests::common::api_fixtures::network_segment::{
     FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY,
     FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY_2, FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS,
@@ -37,7 +39,6 @@ use crate::tests::common::api_fixtures::network_segment::{
     create_underlay_network_segment,
 };
 use crate::tests::common::api_fixtures::{TestEnv, TestEnvOverrides};
-use crate::tests::common::mac_address_pool::HOST_NON_DPU_MAC_ADDRESS_POOL;
 use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 #[derive(Debug, Default)]
@@ -445,6 +446,18 @@ async fn test_zero_dpu_instance_allocation_auto(
         "Machine that was just ingested should have instance network restrictions listing its network segment ID's",
     );
 
+    // Flat VPCs are operator-managed; tenant status should not wait for a NICo
+    // data-plane readiness signal after allocation.
+    let tenant_status = instance
+        .status
+        .as_ref()
+        .and_then(|status| status.tenant.as_ref())
+        .expect("allocated instance should include tenant status");
+    assert_eq!(
+        forge::TenantState::try_from(tenant_status.state).unwrap(),
+        forge::TenantState::Ready
+    );
+
     // On the wire: `auto: true` with empty interfaces. The resolved
     // interface lives in status, not config, which takes place as
     // part of `into_external_view()`.
@@ -536,7 +549,7 @@ async fn test_zero_dpu_instance_allocation_auto_multi_segment(
             HOST_NON_DPU_MAC_ADDRESS_POOL.allocate(),
             HOST_NON_DPU_MAC_ADDRESS_POOL.allocate(),
         ],
-        ..Default::default()
+        ..ManagedHostConfig::default()
     };
 
     // Ingest zero DPU host with custom behavior in the finish callback...
@@ -712,7 +725,8 @@ async fn test_reject_single_dpu_instance_allocation_no_network_config(
     let env = create_test_env_for_instance_allocation(pool.clone(), None).await;
 
     // Create single DPU host
-    let single_dpu_host = api_fixtures::site_explorer::new_host(&env, Default::default()).await?;
+    let single_dpu_host =
+        api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default()).await?;
 
     // Create an instance on a host with DPUs, without specifying a network config, which is not allowed
     let result = crate::handlers::instance::allocate(
@@ -767,7 +781,8 @@ async fn test_reject_single_dpu_instance_allocation_host_inband_network_config(
     let env = create_test_env_for_instance_allocation(pool.clone(), None).await;
 
     // Create single DPU host
-    let single_dpu_host = api_fixtures::site_explorer::new_host(&env, Default::default()).await?;
+    let single_dpu_host =
+        api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default()).await?;
 
     let host_inband_segment =
         db::network_segment::find_by_name(env.pool.begin().await?.deref_mut(), "HOST_INBAND")
@@ -862,7 +877,7 @@ async fn test_reject_zero_dpu_instance_allocation_multiple_vpcs(
             HOST_NON_DPU_MAC_ADDRESS_POOL.allocate(),
             HOST_NON_DPU_MAC_ADDRESS_POOL.allocate(),
         ],
-        ..Default::default()
+        ..ManagedHostConfig::default()
     };
 
     // Ingest zero DPU host
@@ -990,7 +1005,8 @@ async fn test_single_dpu_instance_allocation(
     let env = create_test_env_for_instance_allocation(pool.clone(), None).await;
 
     // Create single DPU host
-    let single_dpu_host = api_fixtures::site_explorer::new_host(&env, Default::default()).await?;
+    let single_dpu_host =
+        api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default()).await?;
 
     let tenant_segment =
         db::network_segment::find_by_name(env.pool.begin().await?.deref_mut(), "TENANT").await?;
@@ -1479,7 +1495,7 @@ async fn test_instance_allocation_rejects_auto_with_explicit_interfaces(
 async fn test_instance_allocation_rejects_auto_on_dpu_host(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::tests::common::api_fixtures::dpu::DpuConfig;
+    use model::test_support::DpuConfig;
 
     let env = create_test_env_for_instance_allocation(pool.clone(), None).await;
     // Default ManagedHostConfig has one DPU.

@@ -23,7 +23,9 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use carbide_machine_controller::config::{FirmwareGlobal, TimePeriod};
-use carbide_machine_controller::handler::MAX_FIRMWARE_UPGRADE_RETRIES;
+use carbide_machine_controller::handler::{
+    MAX_FIRMWARE_UPGRADE_RETRIES, MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES,
+};
 use carbide_preingestion_manager::PreingestionManager;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::MachineId;
@@ -41,6 +43,7 @@ use model::site_explorer::{
     InitialBmcResetPhase, InitialResetPhase, Inventory, PowerDrainState, PowerState,
     PreingestionState, Service, TimeSyncResetPhase,
 };
+use model::test_support::HardwareInfoTemplate;
 use regex::Regex;
 use rpc::forge::forge_server::Forge;
 use rpc::forge_agent_control_response::{Action, LegacyAction};
@@ -54,7 +57,6 @@ use crate::CarbideResult;
 use crate::cfg::file::CarbideConfig;
 use crate::machine_update_manager::MachineUpdateManager;
 use crate::tests::common;
-use crate::tests::common::api_fixtures::managed_host::HardwareInfoTemplate;
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host_with_hardware_info_template, create_test_env,
 };
@@ -1263,6 +1265,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1304,6 +1307,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1355,6 +1359,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1403,6 +1408,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1441,6 +1447,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1501,6 +1508,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1539,6 +1547,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1589,6 +1598,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1659,6 +1669,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1725,6 +1736,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1763,6 +1775,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1799,6 +1812,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -1830,6 +1844,7 @@ async fn test_instance_upgrading_actual_part_2(
         instance_snapshot_derive_status(
             &instance,
             device_id_maps.1,
+            host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
             None,
             None,
@@ -2366,6 +2381,7 @@ async fn test_preingestion_time_sync_reset_flow(
     db::explored_endpoints::set_preingestion_time_sync_reset(
         ip_addr,
         TimeSyncResetPhase::Start,
+        0,
         &mut txn,
     )
     .await?;
@@ -2546,6 +2562,7 @@ async fn test_preingestion_time_sync_retry_logic(
     db::explored_endpoints::set_preingestion_time_sync_reset(
         ip_addr,
         TimeSyncResetPhase::WaitHostBoot,
+        0,
         &mut txn,
     )
     .await?;
@@ -2582,6 +2599,147 @@ async fn test_preingestion_time_sync_retry_logic(
         _ => {
             // Could be other states if firmware upgrade is needed
         }
+    }
+    txn.commit().await?;
+
+    Ok(())
+}
+
+/// When the BMC clock is still out of sync after a reset cycle but the retry
+/// budget is not yet exhausted, the endpoint should re-enter the reset cycle
+/// (TimeSyncReset Start) with an incremented attempt count rather than failing.
+#[crate::sqlx_test]
+async fn test_time_sync_retry_reenters_reset_before_failing(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = common::api_fixtures::create_test_env(pool.clone()).await;
+
+    // Simulate a BMC clock that is well past the 5 minute threshold.
+    env.redfish_sim.set_bmc_time_offset_seconds(600);
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        env.config.preingestion_manager(),
+        env.redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api.work_lock_manager_handle.clone(),
+    );
+
+    let response = env
+        .api
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", "192.0.2.1")
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let addr = response.address.as_str();
+    let ip_addr = IpAddr::from_str(addr).unwrap();
+
+    let mut txn = pool.begin().await.unwrap();
+    insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
+    // First reset cycle just finished (attempt 0), awaiting the boot-wait recheck.
+    db::explored_endpoints::set_preingestion_time_sync_reset(
+        ip_addr,
+        TimeSyncResetPhase::WaitHostBoot,
+        0,
+        &mut txn,
+    )
+    .await?;
+    // Backdate last_time so the boot wait is considered elapsed.
+    db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
+    match &endpoints
+        .first()
+        .expect("endpoint should exist")
+        .preingestion_state
+    {
+        PreingestionState::TimeSyncReset { phase, attempt, .. } => {
+            assert_eq!(
+                *phase,
+                TimeSyncResetPhase::Start,
+                "should retry reset cycle"
+            );
+            assert_eq!(*attempt, 1, "attempt counter should be incremented");
+        }
+        other => panic!("expected a retried TimeSyncReset, got: {other:?}"),
+    }
+    txn.commit().await?;
+
+    Ok(())
+}
+
+/// Once the reset retry budget is exhausted and the BMC clock is still out of
+/// sync, preingestion should fail terminally.
+#[crate::sqlx_test]
+async fn test_time_sync_fails_after_max_attempts(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = common::api_fixtures::create_test_env(pool.clone()).await;
+    env.redfish_sim.set_bmc_time_offset_seconds(600);
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        env.config.preingestion_manager(),
+        env.redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api.work_lock_manager_handle.clone(),
+    );
+
+    let response = env
+        .api
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", "192.0.2.1")
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let addr = response.address.as_str();
+    let ip_addr = IpAddr::from_str(addr).unwrap();
+
+    let mut txn = pool.begin().await.unwrap();
+    insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
+    // Final allowed reset cycle (attempt 2 == MAX_TIME_SYNC_RESET_ATTEMPTS - 1)
+    // just finished, awaiting the boot-wait recheck.
+    db::explored_endpoints::set_preingestion_time_sync_reset(
+        ip_addr,
+        TimeSyncResetPhase::WaitHostBoot,
+        2,
+        &mut txn,
+    )
+    .await?;
+    db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
+    match &endpoints
+        .first()
+        .expect("endpoint should exist")
+        .preingestion_state
+    {
+        PreingestionState::Failed { reason } => {
+            assert!(
+                reason.contains("time synchronization failed"),
+                "unexpected failure reason: {reason}"
+            );
+        }
+        other => panic!("expected Failed after exhausting retries, got: {other:?}"),
     }
     txn.commit().await?;
 
@@ -3217,6 +3375,100 @@ async fn put_in_waiting_for_scout_upgrade(
         .await
         .unwrap();
     txn.commit().await.unwrap();
+}
+
+async fn put_in_new_firmware_reported_wait(
+    env: &TestEnv,
+    mh: &TestManagedHost,
+    previous_reset_time: i64,
+    reset_retry_count: u32,
+) {
+    let mut txn = env.pool.begin().await.unwrap();
+    let machine = mh.host().db_machine(&mut txn).await;
+    let state = ManagedHostState::HostReprovision {
+        reprovision_state: HostReprovisionState::NewFirmwareReportedWait {
+            firmware_type: FirmwareComponentType::Uefi,
+            firmware_number: Some(0),
+            final_version: "1.13.2".to_string(),
+            previous_reset_time: Some(previous_reset_time),
+            reset_retry_count,
+        },
+        retry_count: 0,
+    };
+    db::machine::advance(&machine, &mut txn, &state, None)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+}
+
+#[crate::sqlx_test]
+async fn test_new_firmware_reported_wait_retries_reset_after_timeout(
+    pool: sqlx::PgPool,
+) -> CarbideResult<()> {
+    let env = create_test_env(pool).await;
+    let mh = common::api_fixtures::create_managed_host(&env).await;
+    put_in_new_firmware_reported_wait(&env, &mh, chrono::Utc::now().timestamp() - 31 * 60, 0).await;
+
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await.unwrap();
+    let host = mh.host().db_machine(&mut txn).await;
+    let ManagedHostState::HostReprovision {
+        reprovision_state, ..
+    } = host.current_state()
+    else {
+        panic!("Not in HostReprovision");
+    };
+    let HostReprovisionState::NewFirmwareReportedWait {
+        reset_retry_count, ..
+    } = reprovision_state
+    else {
+        panic!("expected NewFirmwareReportedWait, got {reprovision_state:?}");
+    };
+    assert_eq!(*reset_retry_count, 1);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_new_firmware_reported_wait_fails_after_reset_retry_limit(
+    pool: sqlx::PgPool,
+) -> CarbideResult<()> {
+    let env = create_test_env(pool).await;
+    let mh = common::api_fixtures::create_managed_host(&env).await;
+    put_in_new_firmware_reported_wait(
+        &env,
+        &mh,
+        chrono::Utc::now().timestamp() - 31 * 60,
+        MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES,
+    )
+    .await;
+
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await.unwrap();
+    let host = mh.host().db_machine(&mut txn).await;
+    let ManagedHostState::HostReprovision {
+        reprovision_state, ..
+    } = host.current_state()
+    else {
+        panic!("Not in HostReprovision");
+    };
+    let HostReprovisionState::FailedFirmwareUpgrade { reason, .. } = reprovision_state else {
+        panic!("expected FailedFirmwareUpgrade, got {reprovision_state:?}");
+    };
+    let reason = reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.contains("Firmware version did not converge after completed update"),
+        "unexpected reason: {reason}",
+    );
+    assert!(
+        reason.contains("expected 1.13.2"),
+        "unexpected reason: {reason}",
+    );
+    assert!(reason.contains("1.12.0"), "unexpected reason: {reason}",);
+
+    Ok(())
 }
 
 #[crate::sqlx_test]

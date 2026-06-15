@@ -125,7 +125,12 @@ func testVPCBuildSite(t *testing.T, dbSession *cdb.Session, ip *cdbm.Infrastruct
 func testVPCBuildTenant(t *testing.T, dbSession *cdb.Session, name string, org string, user *cdbm.User) *cdbm.Tenant {
 	tnDAO := cdbm.NewTenantDAO(dbSession)
 
-	tn, err := tnDAO.CreateFromParams(context.Background(), nil, name, cutil.GetPtr("Test Tenant"), org, nil, nil, user)
+	tn, err := tnDAO.Create(context.Background(), nil, cdbm.TenantCreateInput{
+		Name:        name,
+		DisplayName: cutil.GetPtr("Test Tenant"),
+		Org:         org,
+		CreatedBy:   user.ID,
+	})
 	assert.Nil(t, err)
 
 	return tn
@@ -314,6 +319,15 @@ func TestManageVpcPrefix_UpdateVpcPrefixesInDB(t *testing.T) {
 	vpc11 := testVPCBuildVPC(t, dbSession, "test-vpc-11", ip, tn, st, cutil.GetPtr(uuid.New()), nil, tnu, cdbm.VpcStatusReady)
 	vpcPrefix11 := testVPCBuildVPCPrefix(t, dbSession, "test-vpcprefix-11", st, tn, vpc11.ID, &ipb1.ID, cutil.GetPtr("192.168.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusReady, tnu)
 
+	vpc12 := testVPCBuildVPC(t, dbSession, "test-vpc-12", ip, tn, st, cutil.GetPtr(uuid.New()), nil, tnu, cdbm.VpcStatusReady)
+	vpcPrefix12 := testVPCBuildVPCPrefix(t, dbSession, "test-vpcprefix-12", st, tn, vpc12.ID, &ipb1.ID, cutil.GetPtr("192.168.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusProvisioning, tnu)
+
+	vpc13 := testVPCBuildVPC(t, dbSession, "test-vpc-13", ip, tn, st, cutil.GetPtr(uuid.New()), nil, tnu, cdbm.VpcStatusReady)
+	vpcPrefix13 := testVPCBuildVPCPrefix(t, dbSession, "test-vpcprefix-13", st, tn, vpc13.ID, &ipb1.ID, cutil.GetPtr("192.168.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusReady, tnu)
+
+	vpc14 := testVPCBuildVPC(t, dbSession, "test-vpc-14", ip, tn, st, cutil.GetPtr(uuid.New()), nil, tnu, cdbm.VpcStatusReady)
+	vpcPrefix14 := testVPCBuildVPCPrefix(t, dbSession, "test-vpcprefix-14", st, tn, vpc14.ID, &ipb1.ID, cutil.GetPtr("192.168.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusDeleting, tnu)
+
 	// Set created earlier than the inventory receipt interval
 	_, err = dbSession.DB.Exec("UPDATE vpc_prefix SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval)), vpcPrefix11.ID.String())
 	assert.NoError(t, err)
@@ -365,16 +379,18 @@ func TestManageVpcPrefix_UpdateVpcPrefixesInDB(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                string
-		fields              fields
-		args                args
-		updatedVpcPrefix    *cdbm.VpcPrefix
-		readyVpcPrefixes    []*cdbm.VpcPrefix
-		deletedVpcPrefixes  []*cdbm.VpcPrefix
-		missingVpcPrefixes  []*cdbm.VpcPrefix
-		restoredVpcPrefixes []*cdbm.VpcPrefix
-		unpairedVpcPrefixes []*cdbm.VpcPrefix
-		wantErr             bool
+		name                     string
+		fields                   fields
+		args                     args
+		updatedVpcPrefix         *cdbm.VpcPrefix
+		deletingVpcPrefixes      []*cdbm.VpcPrefix
+		readyVpcPrefixes         []*cdbm.VpcPrefix
+		deletedStatusVpcPrefixes []*cdbm.VpcPrefix
+		deletedVpcPrefixes       []*cdbm.VpcPrefix
+		missingVpcPrefixes       []*cdbm.VpcPrefix
+		restoredVpcPrefixes      []*cdbm.VpcPrefix
+		unpairedVpcPrefixes      []*cdbm.VpcPrefix
+		wantErr                  bool
 	}{
 		{
 			name: "test Vpc Prefix inventory processing error, non-existent Site",
@@ -432,13 +448,31 @@ func TestManageVpcPrefix_UpdateVpcPrefixesInDB(t *testing.T) {
 							Id:   &cwssaws.VpcPrefixId{Value: vpcPrefix10.ID.String()},
 							Name: vpcPrefix10.ID.String(),
 						},
+						{
+							Id:     &cwssaws.VpcPrefixId{Value: vpcPrefix12.ID.String()},
+							Name:   vpcPrefix12.ID.String(),
+							Status: &cwssaws.VpcPrefixStatus{TenantState: cwssaws.TenantState_READY},
+						},
+						{
+							Id:     &cwssaws.VpcPrefixId{Value: vpcPrefix13.ID.String()},
+							Name:   vpcPrefix13.ID.String(),
+							Status: &cwssaws.VpcPrefixStatus{TenantState: cwssaws.TenantState_TERMINATING},
+						},
+						{
+							Id:     &cwssaws.VpcPrefixId{Value: vpcPrefix14.ID.String()},
+							Name:   vpcPrefix14.ID.String(),
+							Status: &cwssaws.VpcPrefixStatus{TenantState: cwssaws.TenantState_TERMINATED},
+						},
 					},
 				},
 			},
-			deletedVpcPrefixes:  []*cdbm.VpcPrefix{vpcPrefix5, vpcPrefix6},
-			missingVpcPrefixes:  []*cdbm.VpcPrefix{vpcPrefix7, vpcPrefix11},
-			restoredVpcPrefixes: []*cdbm.VpcPrefix{vpcPrefix8},
-			wantErr:             false,
+			updatedVpcPrefix:         vpcPrefix12,
+			deletingVpcPrefixes:      []*cdbm.VpcPrefix{vpcPrefix3, vpcPrefix4, vpcPrefix10, vpcPrefix13},
+			deletedStatusVpcPrefixes: []*cdbm.VpcPrefix{vpcPrefix14},
+			deletedVpcPrefixes:       []*cdbm.VpcPrefix{vpcPrefix5, vpcPrefix6},
+			missingVpcPrefixes:       []*cdbm.VpcPrefix{vpcPrefix7, vpcPrefix11},
+			restoredVpcPrefixes:      []*cdbm.VpcPrefix{vpcPrefix8},
+			wantErr:                  false,
 		},
 		{
 			name: "test paged Vpc Prefix inventory processing, empty inventory",
@@ -539,6 +573,18 @@ func TestManageVpcPrefix_UpdateVpcPrefixesInDB(t *testing.T) {
 				rv, _ := vpcPrefixDAO.GetByID(ctx, nil, vpcPrefix.ID, nil)
 				assert.False(t, rv.IsMissingOnSite)
 				assert.Equal(t, cdbm.VpcPrefixStatusReady, rv.Status)
+			}
+
+			for _, vpcPrefix := range tt.deletingVpcPrefixes {
+				rv, _ := vpcPrefixDAO.GetByID(ctx, nil, vpcPrefix.ID, nil)
+				assert.False(t, rv.IsMissingOnSite)
+				assert.Equal(t, cdbm.VpcPrefixStatusDeleting, rv.Status)
+			}
+
+			for _, vpcPrefix := range tt.deletedStatusVpcPrefixes {
+				rv, _ := vpcPrefixDAO.GetByID(ctx, nil, vpcPrefix.ID, nil)
+				assert.False(t, rv.IsMissingOnSite)
+				assert.Equal(t, cdbm.VpcPrefixStatusDeleted, rv.Status)
 			}
 
 			for _, vpcPrefix := range tt.deletedVpcPrefixes {

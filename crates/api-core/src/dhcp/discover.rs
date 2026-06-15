@@ -208,6 +208,7 @@ pub async fn discover_dhcp(
                         &mut txn,
                         &expected_interface,
                         relay_ip,
+                        api.runtime_config.retained_boot_interface_window,
                     )
                     .await?;
                     Some(expected_interface.machine_id)
@@ -262,19 +263,17 @@ pub async fn discover_dhcp(
                             is_primary_nic = Some(pmac == parsed_mac);
                         }
                         if let Some(ref nic) = host_nic
-                            && let Some(fixed_ip_str) = &nic.fixed_ip
+                            && let Some(fixed_ip) = nic.fixed_ip
                         {
-                            let fixed_ip: IpAddr = fixed_ip_str.parse().map_err(|_| {
-                            CarbideError::InvalidArgument(format!(
-                                "invalid fixed_ip on ExpectedHostNic {parsed_mac}: {fixed_ip_str}"
-                            ))
-                        })?;
                             // It looks like there's a DHCP reservation for this address,
                             // so make an idempotent call to ensure we have a preallocated
                             // machine interface (and machine interface address) for it,
                             // creating one if needed.
                             db::machine_interface::preallocate_machine_interface(
-                                &mut txn, parsed_mac, fixed_ip,
+                                &mut txn,
+                                parsed_mac,
+                                fixed_ip,
+                                api.runtime_config.retained_boot_interface_window,
                             )
                             .await?;
                         }
@@ -291,7 +290,10 @@ pub async fn discover_dhcp(
                         // InterfaceType::Bmc (and primary=false). Races against
                         // site-explorer's reconciliation pass are handled inside preallocate.
                         db::machine_interface::preallocate_bmc_machine_interface(
-                            &mut txn, parsed_mac, bmc_ip,
+                            &mut txn,
+                            parsed_mac,
+                            bmc_ip,
+                            api.runtime_config.retained_boot_interface_window,
                         )
                         .await?;
                     } else if let Some(s) =
@@ -308,7 +310,10 @@ pub async fn discover_dhcp(
                         // Races against site-explorer's reconciliation pass are handled
                         // inside preallocate.
                         db::machine_interface::preallocate_machine_interface(
-                            &mut txn, parsed_mac, nvos_ip,
+                            &mut txn,
+                            parsed_mac,
+                            nvos_ip,
+                            api.runtime_config.retained_boot_interface_window,
                         )
                         .await?;
                     }
@@ -324,6 +329,7 @@ pub async fn discover_dhcp(
         std::slice::from_ref(&parsed_relay),
         host_nic,
         is_primary_nic,
+        api.runtime_config.retained_boot_interface_window,
     )
     .await?;
 

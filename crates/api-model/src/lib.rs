@@ -94,9 +94,16 @@ pub mod state_history;
 pub mod storage;
 pub mod switch;
 pub mod tenant;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod trim_table;
 pub mod vpc;
 pub mod vpc_prefix;
+
+// Lets the database round-trip tests use `#[crate::sqlx_test]` to get a per-test
+// Postgres pool from the shared harness (DATABASE_URL via .envrc).
+#[cfg(test)]
+pub(crate) use carbide_macros::sqlx_test;
 
 /// Error that is returned when we validate various configurations that are obtained
 /// from Forge users.

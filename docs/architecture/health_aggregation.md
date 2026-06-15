@@ -252,7 +252,7 @@ Details can be found in the [SKU Validation guide](../provisioning/sku-validatio
 
 ### BMC health monitoring
 
-The [`nico-hw-health`](https://github.com/NVIDIA/infra-controller-core/blob/main/crates/health) service periodically queries all Host and DPU BMCs in the system for health information. It emits the captured health datapoints as metrics on a metrics endpoint that can be scraped by a standard telemetry system (prometheus/otel).
+The [`nico-hw-health`](https://github.com/NVIDIA/infra-controller/blob/main/crates/health) service periodically queries all Host and DPU BMCs in the system for health information. It emits the captured health datapoints as metrics on a metrics endpoint that can be scraped by a standard telemetry system (prometheus/otel).
 
 Health metrics fetched from BMCs include:
 - Fan speeds
@@ -268,8 +268,8 @@ ranges or by interpreting the `health_ok` values provided by BMCs.
 For production deployments, `nico-hw-health` discovers machine, switch, and power-shelf BMC endpoints from NICo API via `[endpoint_sources.nico_api]`. Machine endpoints carry the inventory metadata needed to interpret hardware health in fleet context, including machine ID, serial number, rack ID, rack placement, and NVLink domain UUID when present. Switch endpoints carry switch ID, serial number, and rack placement when present. Local and test deployments can instead configure explicit machine, switch, or power-shelf identity with `[[endpoint_sources.static_bmc_endpoints]]`; static machine endpoints can include the same serial number, rack placement, and NVLink domain UUID metadata, static switch endpoints can include serial number and rack placement metadata, and all static endpoints can provide `rack_id` when rack-level rollups are needed.
 
 The publishing sinks expose that inventory context using the conventions of the target backend:
-- `[sinks.prometheus]` adds machine metadata as metric labels named `machine_id`, `serial_number`, `machine_slot_number`, `machine_tray_index`, and `nvlink_domain_uuid`; switch metadata uses `switch_id`, `serial_number`, `switch_slot_number`, and `switch_tray_index`.
-- `[sinks.otlp]` adds machine metadata as OTLP resource attributes named `machine.id`, integer `machine.slot_number`, integer `machine.tray_index`, and `nvlink.domain.uuid`; switch metadata uses `switch.id`, integer `switch.slot_number`, and integer `switch.tray_index`.
+- `[sinks.prometheus]` adds machine metadata as metric labels named `machine_id`, `serial_number`, `rack_id`, `machine_slot_number`, `machine_tray_index`, and `nvlink_domain_uuid`; switch metadata uses `switch_id`, `serial_number`, `rack_id`, `switch_slot_number`, and `switch_tray_index`.
+- `[sinks.otlp]` adds machine metadata as OTLP resource attributes named `machine.id`, `rack.id`, integer `machine.slot_number`, integer `machine.tray_index`, and `nvlink.domain.uuid`; switch metadata uses `switch.id`, `rack.id`, integer `switch.slot_number`, and integer `switch.tray_index`.
 - `[sinks.health_report]`, `[sinks.rack_health_report]`, `[sinks.switch_health_report]`, and `[sinks.power_shelf_health_report]` use the same event context when submitting assessed health reports back to NICo API. The persisted `HealthReport` and `HealthProbeAlert` schemas remain the probe success/alert model described above.
 
 ### BMC inventory monitoring
@@ -282,7 +282,7 @@ In certain conditions the scraping process will place a health alert on the host
 
 ### dpu-agent based health monitoring
 
-[`dpu-agent`](https://github.com/NVIDIA/infra-controller-core/blob/main/crates/agent) collects health information directly on the DPU and sends a health-**rollup** towards `nico-core`. The agent monitors a variety of health conditions, including
+[`dpu-agent`](https://github.com/NVIDIA/infra-controller/blob/main/crates/agent) collects health information directly on the DPU and sends a health-**rollup** towards `nico-core`. The agent monitors a variety of health conditions, including
 - whether BGP sessions are established to peers according to the current configuration of the DPU
 - whether all required services on the DPU are running
 - whether the DPU is configured in restricted mode

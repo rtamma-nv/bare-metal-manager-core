@@ -26,9 +26,32 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
-/// `forge-admin-cli expected-machine add` — mirrors expected switch flags; optional
+/// `nico-admin-cli expected-machine add` — mirrors expected switch flags; optional
 /// `--bmc-ip-address` forwards to the API static-BMC pre-allocation path.
 #[derive(Parser, Debug, Serialize, Deserialize)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Add an expected machine with the required identifiers:
+    $ nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 \
+    --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1
+
+Add a machine with metadata and a SKU:
+    $ nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 \
+    --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 \
+    --meta-name MyMachine --label DATACENTER:XYZ --sku-id DGX-H100-640GB
+
+Pre-allocate a static BMC IP (site-explorer path, like expected switches):
+    $ nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 \
+    --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 \
+    --bmc-ip-address 192.0.2.20
+
+Add a host whose DPU should be treated as a plain NIC:
+    $ nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 \
+    --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 \
+    --dpu-mode nic-mode
+
+")]
 pub struct Args {
     #[clap(short = 'a', long, help = "BMC MAC Address of the expected machine")]
     pub bmc_mac_address: MacAddress,
@@ -189,7 +212,7 @@ impl TryFrom<Args> for rpc::forge::ExpectedMachine {
             rack_id: value.rack_id,
             default_pause_ingestion_and_poweron: value.default_pause_ingestion_and_poweron,
             #[allow(deprecated)]
-            dpf_enabled: value.dpf_enabled.unwrap_or_default(),
+            dpf_enabled: value.dpf_enabled.unwrap_or(true),
             is_dpf_enabled: value.dpf_enabled,
             bmc_ip_address: value.bmc_ip_address.map(|ip| ip.to_string()),
             bmc_retain_credentials: value.bmc_retain_credentials,

@@ -18,6 +18,23 @@
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Load bash completions into the current shell (also enables carbide-admin-cli and forge-admin-cli):
+    $ source <(nico-admin-cli generate-shell-complete bash)
+
+Load zsh completions into the current shell (also enables carbide-admin-cli and forge-admin-cli):
+    $ source <(nico-admin-cli generate-shell-complete zsh)
+
+Write zsh completions to a file on the fpath (run once; re-source your shell):
+    $ nico-admin-cli generate-shell-complete zsh > ~/.zfunc/_nico-admin-cli && \
+    echo 'compdef _nico-admin-cli carbide-admin-cli forge-admin-cli' >> ~/.zshrc
+
+Write fish completions to the fish completions directory:
+    $ nico-admin-cli generate-shell-complete fish > ~/.config/fish/completions/nico-admin-cli.fish
+
+")]
 pub struct Cmd {
     #[clap(subcommand)]
     pub shell: Shell,

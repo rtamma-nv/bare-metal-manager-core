@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use forge_secrets::credentials::CredentialReader;
+use carbide_secrets::credentials::CredentialReader;
 use mqttea::QoS;
 use mqttea::client::{ClientOptions, MqtteaClient};
 use mqttea::registry::JsonRegistration;
@@ -46,20 +46,6 @@ pub enum MqttMessage {
 ///
 /// Sets up the MQTT client, registers message handlers, subscribes to topics,
 /// and connects. Returns a receiver that yields messages with drop-on-overflow.
-///
-/// The underlying mqttea event loop has two layered recoveries for the
-/// NVBug 6191840 wedge (broker outage leaves TCP connected but no
-/// MQTT subscribe ever follows, consumer goes idle):
-///
-/// * On every CONNACK, mqttea re-issues SUBSCRIBE for every tracked
-///   topic so a fresh broker session always has the subscriptions we
-///   expect, even though the underlying client uses clean_session=false.
-///
-/// * If the event loop goes `config.reconnect_rebuild_threshold` without
-///   a successful SubAck/Publish/PingResp, mqttea tears down and rebuilds
-///   the rumqttc client (replaying tracked subscriptions on the new
-///   session). Backstop for the rare case where rumqttc gets fully
-///   wedged and never reaches CONNACK on its own.
 pub async fn connect(
     config: &MqttConfig,
     metrics: ConsumerMetrics,
@@ -70,9 +56,7 @@ pub async fn connect(
     // QoS 0 is the recommended setting for DSX Exchange integrations.
     // BMS will republish all messages periodically to handle missed messages.
     let options = {
-        let defaults = ClientOptions::default()
-            .with_qos(QoS::AtMostOnce)
-            .with_rebuild_after_persistent_disconnect(config.reconnect_rebuild_threshold);
+        let defaults = ClientOptions::default().with_qos(QoS::AtMostOnce);
         if let Some(provider) =
             build_credentials_provider(config, credential_reader.clone()).await?
         {
@@ -156,8 +140,8 @@ async fn build_credentials_provider(
     config: &MqttConfig,
     credential_reader: Arc<dyn CredentialReader>,
 ) -> Result<Option<Arc<dyn mqttea::auth::CredentialsProvider>>, DsxConsumerError> {
-    let credential_key = forge_secrets::credentials::CredentialKey::MqttAuth {
-        credential_type: forge_secrets::credentials::MqttCredentialType::DsxExchangeConsumer,
+    let credential_key = carbide_secrets::credentials::CredentialKey::MqttAuth {
+        credential_type: carbide_secrets::credentials::MqttCredentialType::DsxExchangeConsumer,
     };
 
     match config.auth.auth_mode {
@@ -173,7 +157,7 @@ async fn build_credentials_provider(
                         credential_key.to_key_str()
                     ))
                 })?;
-            let forge_secrets::credentials::Credentials::UsernamePassword { username, password } =
+            let carbide_secrets::credentials::Credentials::UsernamePassword { username, password } =
                 creds;
             Ok(Some(Arc::new(mqttea::auth::StaticCredentials::new(
                 username, password,
@@ -209,7 +193,7 @@ async fn build_credentials_provider(
 }
 
 struct SecretBackedOAuth2Credentials {
-    credential_key: forge_secrets::credentials::CredentialKey,
+    credential_key: carbide_secrets::credentials::CredentialKey,
     credential_reader: Arc<dyn CredentialReader>,
 }
 
@@ -229,7 +213,7 @@ impl mqttea::auth::ClientCredentialsProvider for SecretBackedOAuth2Credentials {
                     self.credential_key.to_key_str()
                 ))
             })?;
-        let forge_secrets::credentials::Credentials::UsernamePassword { username, password } =
+        let carbide_secrets::credentials::Credentials::UsernamePassword { username, password } =
             creds;
         Ok((
             mqttea::ClientId::new(username),

@@ -97,7 +97,13 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 			// Enable targeted instance creation for org
 			TargetedInstanceCreation: true,
 		}
-		tn, serr = tnDAO.CreateFromParams(ctx, nil, org, nil, org, cutil.GetPtr(org), tenantConfig, dbUser)
+		tn, serr = tnDAO.Create(ctx, nil, cdbm.TenantCreateInput{
+			Name:           org,
+			Org:            org,
+			OrgDisplayName: cutil.GetPtr(org),
+			Config:         tenantConfig,
+			CreatedBy:      dbUser.ID,
+		})
 		if serr != nil {
 			logger.Error().Err(serr).Msg("error creating Tenant DB entity")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Tenant for org, DB error", nil)
@@ -110,7 +116,10 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 			// Update Tenant to enable targeted instance creation
 			tenantConfig := tn.Config
 			tenantConfig.TargetedInstanceCreation = true
-			tn, serr = tnDAO.UpdateFromParams(ctx, nil, tn.ID, nil, nil, nil, tenantConfig)
+			tn, serr = tnDAO.Update(ctx, nil, cdbm.TenantUpdateInput{
+				TenantID: tn.ID,
+				Config:   tenantConfig,
+			})
 			if serr != nil {
 				logger.Error().Err(serr).Msg("error updating Tenant DB entity")
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to update Tenant capabilities for org, DB error", nil)
@@ -130,19 +139,33 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 	}
 
 	if len(tas) == 0 {
-		// Create Tenant Account
-		_, serr = taDAO.Create(ctx, nil, cdbm.TenantAccountCreateInput{
-			AccountNumber:             common.GenerateAccountNumber(),
-			TenantID:                  &tn.ID,
-			TenantOrg:                 org,
-			InfrastructureProviderID:  ip.ID,
-			InfrastructureProviderOrg: ip.Org,
-			Status:                    cdbm.TenantAccountStatusReady,
-			CreatedBy:                 dbUser.ID,
+		sdDAO := cdbm.NewStatusDetailDAO(gcsah.dbSession)
+		serr = cdb.WithTx(ctx, gcsah.dbSession, func(tx *cdb.Tx) error {
+			ta, derr := taDAO.Create(ctx, tx, cdbm.TenantAccountCreateInput{
+				AccountNumber:             common.GenerateAccountNumber(),
+				TenantID:                  &tn.ID,
+				TenantOrg:                 org,
+				InfrastructureProviderID:  ip.ID,
+				InfrastructureProviderOrg: ip.Org,
+				Status:                    cdbm.TenantAccountStatusReady,
+				CreatedBy:                 dbUser.ID,
+			})
+			if derr != nil {
+				logger.Error().Err(derr).Msg("error creating Tenant Account DB entity")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Tenant Account for org's Tenant, DB error", nil)
+			}
+
+			_, derr = sdDAO.CreateFromParams(ctx, tx, ta.ID.String(), cdbm.TenantAccountStatusReady,
+				cutil.GetPtr("service account enabled, tenant account ready"))
+			if derr != nil {
+				logger.Error().Err(derr).Msg("error creating Status Detail for Tenant Account")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for org's Tenant Account, DB error", nil)
+			}
+
+			return nil
 		})
 		if serr != nil {
-			logger.Error().Err(serr).Msg("error creating Tenant Account DB entity")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Tenant Account for org's Tenant, DB error", nil)
+			return common.HandleTxError(c, logger, serr, "Failed to create Tenant Account, DB transaction error")
 		}
 	}
 

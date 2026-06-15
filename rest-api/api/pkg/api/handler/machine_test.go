@@ -196,7 +196,10 @@ func testMachineUpdateTenantCapability(t *testing.T, dbSession *cdb.Session, tn 
 	}
 
 	tnDAO := cdbm.NewTenantDAO(dbSession)
-	tn, err := tnDAO.UpdateFromParams(context.Background(), nil, tn.ID, nil, nil, nil, &tncfg)
+	tn, err := tnDAO.Update(context.Background(), nil, cdbm.TenantUpdateInput{
+		TenantID: tn.ID,
+		Config:   &tncfg,
+	})
 	assert.Nil(t, err)
 
 	return tn
@@ -250,7 +253,10 @@ func testMachineBuildAllocation(t *testing.T, dbSession *cdb.Session, ip *cdbm.I
 func testMachineBuildAllocationContraints(t *testing.T, dbSession *cdb.Session, al *cdbm.Allocation, rt string, rtID uuid.UUID, ct string, cv int, user *cdbm.User) *cdbm.AllocationConstraint {
 	alctDAO := cdbm.NewAllocationConstraintDAO(dbSession)
 
-	alct, err := alctDAO.CreateFromParams(context.Background(), nil, al.ID, rt, rtID, ct, cv, nil, user.ID)
+	alct, err := alctDAO.Create(context.Background(), nil, cdbm.AllocationConstraintCreateInput{
+		AllocationID: al.ID, ResourceType: rt, ResourceTypeID: rtID,
+		ConstraintType: ct, ConstraintValue: cv, CreatedBy: user.ID,
+	})
 	assert.Nil(t, err)
 
 	return alct

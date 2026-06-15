@@ -12,7 +12,7 @@ use crate::config::BackendTlsConfig;
 use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
     NvSwitchManager, SwitchComponentResult, SwitchEndpoint, SwitchFirmwareUpdateStatus,
-    SwitchSlotAndTrayResult,
+    SwitchPowerStateResult, SwitchSlotAndTrayResult,
 };
 use crate::proto::nsm;
 use crate::types::parse_mac;
@@ -62,9 +62,9 @@ fn map_nsm_update_state(state: i32) -> FirmwareState {
     }
 }
 
-fn credentials_to_nsm(creds: &forge_secrets::credentials::Credentials) -> nsm::Credentials {
+fn credentials_to_nsm(creds: &carbide_secrets::credentials::Credentials) -> nsm::Credentials {
     match creds {
-        forge_secrets::credentials::Credentials::UsernamePassword { username, password } => {
+        carbide_secrets::credentials::Credentials::UsernamePassword { username, password } => {
             nsm::Credentials {
                 username: username.clone(),
                 password: password.clone(),
@@ -353,11 +353,26 @@ impl NvSwitchManager for NsmSwitchBackend {
             })
             .collect())
     }
+
+    #[instrument(skip(self), fields(backend = "nsm"))]
+    async fn get_power_state(
+        &self,
+        endpoints: &[SwitchEndpoint],
+    ) -> Result<Vec<SwitchPowerStateResult>, ComponentManagerError> {
+        Ok(endpoints
+            .iter()
+            .map(|ep| SwitchPowerStateResult {
+                bmc_mac: ep.bmc_mac,
+                power_state: None,
+                error: Some("get power state is not supported by NSM".into()),
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use forge_secrets::credentials::Credentials;
+    use carbide_secrets::credentials::Credentials;
 
     use super::*;
 

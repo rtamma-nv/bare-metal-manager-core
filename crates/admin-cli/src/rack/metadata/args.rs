@@ -33,12 +33,27 @@ pub enum Args {
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Show a rack's metadata:
+    $ nico-admin-cli rack metadata show 12345678-1234-5678-90ab-cdef01234567
+
+")]
 pub struct RackMetadataCommandShow {
     #[clap(help = "The rack which should get its metadata displayed")]
     pub rack: RackId,
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Set a rack's name and description:
+    $ nico-admin-cli rack metadata set 12345678-1234-5678-90ab-cdef01234567 \
+    --name rack-01 --description \"Row C, position 1\"
+
+")]
 pub struct RackMetadataCommandSet {
     #[clap(help = "The rack which should get updated metadata")]
     pub rack: RackId,
@@ -49,6 +64,17 @@ pub struct RackMetadataCommandSet {
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Add a key-only label:
+    $ nico-admin-cli rack metadata add-label 12345678-1234-5678-90ab-cdef01234567 --key edge
+
+Add a key/value label:
+    $ nico-admin-cli rack metadata add-label 12345678-1234-5678-90ab-cdef01234567 \
+    --key row --value C
+
+")]
 pub struct RackMetadataCommandAddLabel {
     #[clap(help = "The rack which should get updated metadata")]
     pub rack: RackId,
@@ -59,6 +85,14 @@ pub struct RackMetadataCommandAddLabel {
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Remove one or more labels by key:
+    $ nico-admin-cli rack metadata remove-labels 12345678-1234-5678-90ab-cdef01234567 \
+    --keys row --keys edge
+
+")]
 pub struct RackMetadataCommandRemoveLabels {
     #[clap(help = "The rack which should get updated metadata")]
     pub rack: RackId,
@@ -67,6 +101,17 @@ pub struct RackMetadataCommandRemoveLabels {
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Fill in missing metadata from the expected-rack (leaving existing values intact):
+    $ nico-admin-cli rack metadata from-expected-rack 12345678-1234-5678-90ab-cdef01234567
+
+Overwrite the rack's metadata with the expected-rack's values:
+    $ nico-admin-cli rack metadata from-expected-rack 12345678-1234-5678-90ab-cdef01234567 \
+    --replace-all
+
+")]
 pub struct RackMetadataCommandFromExpectedRack {
     #[clap(help = "The rack which should get updated metadata")]
     pub rack: RackId,

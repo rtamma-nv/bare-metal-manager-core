@@ -128,6 +128,7 @@ async fn test_site_explorer_reconcile_creates_missing_preallocations(
             ip,
             model::machine_interface::InterfaceType::Bmc,
             kind,
+            None,
         )
         .await;
     }
@@ -191,6 +192,7 @@ async fn test_site_explorer_reconcile_is_idempotent(
             bmc_ip,
             model::machine_interface::InterfaceType::Bmc,
             "expected_machine BMC",
+            None,
         )
         .await;
     }
@@ -219,6 +221,7 @@ async fn test_site_explorer_reconcile_preallocates_host_nic_fixed_ip(
     let bmc_mac: MacAddress = "AA:BB:CC:DD:E1:01".parse().unwrap();
     let nic_mac: MacAddress = "AA:BB:CC:DD:E1:02".parse().unwrap();
     let fixed_ip = "10.99.0.20";
+    let parsed_fixed_ip: IpAddr = fixed_ip.parse().unwrap();
 
     let mut txn = pool.begin().await?;
     db::expected_machine::create(
@@ -231,7 +234,7 @@ async fn test_site_explorer_reconcile_preallocates_host_nic_fixed_ip(
                 host_nics: vec![model::expected_machine::ExpectedHostNic {
                     mac_address: nic_mac,
                     nic_type: Some("onboard".into()),
-                    fixed_ip: Some(fixed_ip.into()),
+                    fixed_ip: Some(parsed_fixed_ip),
                     fixed_mask: None,
                     fixed_gateway: None,
                     primary: None,
@@ -243,13 +246,13 @@ async fn test_site_explorer_reconcile_preallocates_host_nic_fixed_ip(
     .await?;
     txn.commit().await?;
 
-    let parsed_fixed_ip: IpAddr = fixed_ip.parse().unwrap();
     carbide_site_explorer::try_preallocate_one(
         &pool,
         nic_mac,
         parsed_fixed_ip,
         model::machine_interface::InterfaceType::Data,
         "expected_machine host NIC",
+        None,
     )
     .await;
 
@@ -322,6 +325,7 @@ async fn test_site_explorer_reconcile_tolerates_per_entry_conflicts(
             ip,
             model::machine_interface::InterfaceType::Bmc,
             "expected_machine BMC",
+            None,
         )
         .await;
     }
@@ -400,6 +404,7 @@ async fn test_site_explorer_reconcile_preallocates_nvos_ip(
         nvos_ip,
         model::machine_interface::InterfaceType::Data,
         "expected_switch NVOS",
+        None,
     )
     .await;
 

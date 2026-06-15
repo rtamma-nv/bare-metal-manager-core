@@ -33,12 +33,27 @@ pub enum Args {
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Show a machine's metadata:
+    $ nico-admin-cli machine metadata show 12345678-1234-5678-90ab-cdef01234567
+
+")]
 pub struct MachineMetadataCommandShow {
     #[clap(help = "The machine which should get updated metadata")]
     pub machine: MachineId,
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Set a machine's name and description:
+    $ nico-admin-cli machine metadata set 12345678-1234-5678-90ab-cdef01234567 \
+    --name gpu-node-01 --description \"Rack 4, tray 2\"
+
+")]
 pub struct MachineMetadataCommandSet {
     #[clap(help = "The machine which should get updated metadata")]
     pub machine: MachineId,
@@ -49,6 +64,17 @@ pub struct MachineMetadataCommandSet {
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Add a key-only label:
+    $ nico-admin-cli machine metadata add-label 12345678-1234-5678-90ab-cdef01234567 --key edge
+
+Add a key/value label:
+    $ nico-admin-cli machine metadata add-label 12345678-1234-5678-90ab-cdef01234567 \
+    --key rack --value 4
+
+")]
 pub struct MachineMetadataCommandAddLabel {
     #[clap(help = "The machine which should get updated metadata")]
     pub machine: MachineId,
@@ -59,6 +85,14 @@ pub struct MachineMetadataCommandAddLabel {
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Remove one or more labels by key:
+    $ nico-admin-cli machine metadata remove-labels 12345678-1234-5678-90ab-cdef01234567 \
+    --keys rack --keys edge
+
+")]
 pub struct MachineMetadataCommandRemoveLabels {
     #[clap(help = "The machine which should get updated metadata")]
     pub machine: MachineId,
@@ -67,6 +101,17 @@ pub struct MachineMetadataCommandRemoveLabels {
 }
 
 #[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Fill in missing metadata from the expected-machine (leaving existing values intact):
+    $ nico-admin-cli machine metadata from-expected-machine 12345678-1234-5678-90ab-cdef01234567
+
+Overwrite the machine's metadata with the expected-machine's values:
+    $ nico-admin-cli machine metadata from-expected-machine 12345678-1234-5678-90ab-cdef01234567 \
+    --replace-all
+
+")]
 pub struct MachineMetadataCommandFromExpectedMachine {
     #[clap(help = "The machine which should get updated metadata")]
     pub machine: MachineId,
