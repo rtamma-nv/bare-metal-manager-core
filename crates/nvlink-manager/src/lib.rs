@@ -875,6 +875,14 @@ pub struct NvlPartitionMonitor {
     work_lock_manager_handle: WorkLockManagerHandle,
 }
 
+struct CheckPartitionsInput {
+    db_nvl_logical_partitions: Vec<LogicalPartition>,
+    db_nvl_partitions: Vec<NvlPartition>,
+    machine_nvlink_info: HashMap<MachineId, Option<MachineNvLinkInfo>>,
+    managed_host_snapshots: HashMap<MachineId, ManagedHostStateSnapshot>,
+    nvlink_info_db_updates: Vec<(MachineId, MachineNvLinkInfo)>,
+}
+
 impl NvlPartitionMonitor {
     const ITERATION_WORK_KEY: &'static str = "NvlPartitionMonitor::run_single_iteration";
 
@@ -1155,11 +1163,13 @@ impl NvlPartitionMonitor {
                 .check_partitions_and_apply_nmx_c_operations(
                     nmxc_client.as_mut(),
                     metrics,
-                    db_nvl_logical_partitions.clone(),
-                    db_nvl_partitions_domain,
-                    machine_nvlink_info_domain,
-                    managed_host_snapshots_domain,
-                    nvlink_info_db_updates,
+                    CheckPartitionsInput {
+                        db_nvl_logical_partitions: db_nvl_logical_partitions.clone(),
+                        db_nvl_partitions: db_nvl_partitions_domain,
+                        machine_nvlink_info: machine_nvlink_info_domain,
+                        managed_host_snapshots: managed_host_snapshots_domain,
+                        nvlink_info_db_updates,
+                    },
                 )
                 .await?;
             total_completed_operations += num_completed;
@@ -1172,17 +1182,19 @@ impl NvlPartitionMonitor {
 
     /// Fetches partition list from NMX-C, checks for needed create/update/delete operations,
     /// executes them, polls for completion, and updates the DB with the results.
-    #[allow(clippy::too_many_arguments)]
     async fn check_partitions_and_apply_nmx_c_operations(
         &self,
         nmxc_client: &mut dyn Nmxc,
         metrics: &mut NvlPartitionMonitorMetrics,
-        db_nvl_logical_partitions: Vec<LogicalPartition>,
-        db_nvl_partitions: Vec<NvlPartition>,
-        machine_nvlink_info: HashMap<MachineId, Option<MachineNvLinkInfo>>,
-        managed_host_snapshots: HashMap<MachineId, ManagedHostStateSnapshot>,
-        nvlink_info_db_updates: Vec<(MachineId, MachineNvLinkInfo)>,
+        input: CheckPartitionsInput,
     ) -> NvLinkManagerResult<usize> {
+        let CheckPartitionsInput {
+            db_nvl_logical_partitions,
+            db_nvl_partitions,
+            machine_nvlink_info,
+            managed_host_snapshots,
+            nvlink_info_db_updates,
+        } = input;
         let partition_info_list = nmxc_client
             .get_partition_info_list(GetPartitionInfoListRequest {
                 context: Some(libnmxc::nmxc_model::Context {
