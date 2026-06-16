@@ -47,7 +47,7 @@ use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
 use model::rack::RackConfig;
 use model::site_explorer::{Chassis, EndpointExplorationReport, EndpointType};
 use model::switch::{NewSwitch, SwitchConfig};
-use model::test_support::{DpuConfig, ManagedHostConfig};
+use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self, HealthReportEntry, InsertMachineHealthReportRequest};
 use rpc::forge_agent_control_response::{Action, LegacyAction};
@@ -1646,8 +1646,7 @@ pub async fn new_host_with_machine_validation(
     machine_validation_result_data: Option<rpc::forge::MachineValidationResult>,
     error: Option<String>,
 ) -> eyre::Result<ManagedHostStateSnapshot> {
-    let managed_host =
-        ManagedHostConfig::with_dpus((0..dpu_count).map(|_| DpuConfig::default()).collect());
+    let managed_host = ManagedHostConfig::default().with_dpu_count(dpu_count.into());
     register_expected_machine(env, &managed_host, None).await;
     let mut mock_explored_host = MockExploredHost::new(env, managed_host);
 
@@ -1888,7 +1887,7 @@ impl Default for TestRackDbBuilder {
     fn default() -> Self {
         TestRackDbBuilder {
             rack_id: RackId::new(uuid::Uuid::new_v4().to_string()),
-            rack_profile_id: Some(RackProfileId::new("rack")),
+            rack_profile_id: Some(RackProfileId::new(super::TEST_RMS_RACK_PROFILE_ID)),
         }
     }
 }
