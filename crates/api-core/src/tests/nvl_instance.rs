@@ -2046,6 +2046,7 @@ fn nmxc_simulator_tests_enabled() -> bool {
 
 const GB200_TRAY_4_CHASSIS_SERIAL: &str = "27XYX27000001";
 
+/// Removes the `nvlink_nmxc_endpoints` row for `chassis_serial` so NMX-C resolution fails in tests.
 async fn delete_nvlink_nmxc_endpoint(pool: &sqlx::PgPool, chassis_serial: &str) {
     let mut txn = pool
         .begin()
@@ -2062,6 +2063,7 @@ async fn delete_nvlink_nmxc_endpoint(pool: &sqlx::PgPool, chassis_serial: &str) 
         .expect("commit nvlink_nmxc_endpoint delete");
 }
 
+/// Asserts the machine has a populated NVLink status observation with partition assignments.
 async fn assert_machine_nvlink_observation_present(
     mh: &TestManagedHost,
     expected_gpu_count: usize,
@@ -2084,6 +2086,7 @@ async fn assert_machine_nvlink_observation_present(
     }
 }
 
+/// Asserts `nvlink_status_observation` was cleared (null) via RPC and in the database.
 async fn assert_machine_nvlink_observation_null(mh: &TestManagedHost, pool: &sqlx::PgPool) {
     let machine = mh.host().rpc_machine().await;
     assert!(
@@ -2937,6 +2940,8 @@ async fn test_managed_host_creation_with_tray_default_partition_use_nmxc_simulat
     assert_eq!(nmxc_partitions[0].name, "tray_partition_1");
 }
 
+/// Verifies null `nvlink_status_observation` is written when the NMX-C endpoint cannot be resolved.
+/// Verifies the NVLink config is not synced when NMX-C is unreachable.
 #[crate::sqlx_test]
 async fn test_null_nvlink_observation_after_nmxc_unreachable_use_nmxc_simulator(
     pool: sqlx::PgPool,
@@ -3046,4 +3051,17 @@ async fn test_null_nvlink_observation_after_nmxc_unreachable_use_nmxc_simulator(
     env.run_nvl_partition_monitor_iteration().await;
 
     assert_machine_nvlink_observation_null(&mh, &pool).await;
+
+    let instance_after_failure = tinstance.rpc_instance().await;
+    let instance_status_after_failure = instance_after_failure.status();
+    let nvlink_status_after_failure = instance_status_after_failure
+        .inner()
+        .nvlink
+        .as_ref()
+        .expect("expected nvlink status after monitor iteration");
+    assert_ne!(
+        nvlink_status_after_failure.configs_synced(),
+        rpc::SyncState::Synced,
+        "nvlink config must not remain Synced when NMX-C is unreachable"
+    );
 }

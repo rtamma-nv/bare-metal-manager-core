@@ -56,13 +56,21 @@ pub struct NvlPartitionMonitorMetrics {
     pub num_nmx_c_unreachable_chassis: HashMap<ChassisNmxCUnreachableReason, usize>,
 }
 
+/// Why the partition monitor could not use NMX-C for a chassis during an iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChassisNmxCUnreachableReason {
+    /// No rack-switch NVOS IP or `nvlink_nmxc_endpoints` row resolved an endpoint URL.
     NoEndpoint,
+    /// The resolved endpoint URL could not be parsed as a valid NMX-C client URI.
     InvalidEndpointUri,
+    /// The NMX-C client pool failed to create a client for the resolved endpoint.
     ClientCreateFailed,
+    /// NMX-C `hello` failed after the client was created.
     HelloFailed,
+    /// NMX-C `hello` succeeded but the domain UUID in the response could not be parsed.
     DomainUuidParseFailed,
+    /// Partition monitor work failed after NMX-C connectivity was established (for example, partition list fetch).
+    PartitionMonitorWorkFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -412,6 +420,9 @@ impl From<ChassisNmxCUnreachableReason> for opentelemetry::Value {
             ChassisNmxCUnreachableReason::ClientCreateFailed => "client_create_failed",
             ChassisNmxCUnreachableReason::HelloFailed => "hello_failed",
             ChassisNmxCUnreachableReason::DomainUuidParseFailed => "domain_uuid_parse_failed",
+            ChassisNmxCUnreachableReason::PartitionMonitorWorkFailed => {
+                "partition_monitor_work_failed"
+            }
         };
 
         Self::from(str_value)

@@ -45,6 +45,7 @@ async fn compute_node_info_list_json(
     Ok((body, 200, HashMap::new()))
 }
 
+/// Calls NMX-C `GetSwitchNodeInfoList` and returns the JSON response for the NMX-C browser.
 async fn switch_node_info_list_json(
     nmxc: &mut dyn Nmxc,
 ) -> Result<(String, i32, HashMap<String, String>), CarbideError> {
@@ -90,6 +91,7 @@ async fn gpu_info_json(
     Ok((body, 200, HashMap::new()))
 }
 
+/// Calls NMX-C `GetPartitionInfoList` and returns the JSON response for the NMX-C browser.
 async fn partition_info_list_json(
     nmxc: &mut dyn Nmxc,
 ) -> Result<(String, i32, HashMap<String, String>), CarbideError> {
@@ -108,6 +110,7 @@ async fn partition_info_list_json(
     Ok((body, 200, HashMap::new()))
 }
 
+/// Calls NMX-C `GetDomainProperties` and returns the JSON response for the NMX-C browser.
 async fn get_domain_properties_json(
     nmxc: &mut dyn Nmxc,
 ) -> Result<(String, i32, HashMap<String, String>), CarbideError> {

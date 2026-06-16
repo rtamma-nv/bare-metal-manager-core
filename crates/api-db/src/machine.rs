@@ -926,6 +926,9 @@ pub async fn update_nvlink_status_observation(
     Ok(())
 }
 
+/// Clears `machines.nvlink_status_observation` for the given machine IDs.
+///
+/// Used when NMX-C is unreachable so instance state does not retain stale partition observations.
 pub async fn clear_nvlink_status_observations(
     txn: &mut PgConnection,
     machine_ids: &[MachineId],

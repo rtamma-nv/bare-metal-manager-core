@@ -886,9 +886,13 @@ struct CheckPartitionsInput {
     nvlink_info_db_updates: Vec<(MachineId, MachineNvLinkInfo)>,
 }
 
+/// Work queued when NMX-C cannot be used for a chassis and observations must be cleared.
 struct PendingNullNvlinkObservation {
+    /// Chassis serial for the machines whose observations will be cleared.
     chassis_serial: String,
+    /// Failure reason recorded in partition-monitor metrics.
     reason: ChassisNmxCUnreachableReason,
+    /// Host machines on the chassis that will receive a null `nvlink_status_observation`.
     machine_ids: Vec<MachineId>,
 }
 
@@ -1199,7 +1203,7 @@ impl NvlPartitionMonitor {
                 .cloned()
                 .collect();
 
-            let num_completed = self
+            let num_completed = match self
                 .check_partitions_and_apply_nmx_c_operations(
                     nmxc_client.as_mut(),
                     metrics,
@@ -1211,7 +1215,24 @@ impl NvlPartitionMonitor {
                         nvlink_info_db_updates,
                     },
                 )
-                .await?;
+                .await
+            {
+                Ok(num_completed) => num_completed,
+                Err(e) => {
+                    tracing::warn!(
+                        %chassis_serial,
+                        error = %e,
+                        "Partition monitor work failed for chassis; queuing null nvlink status observations"
+                    );
+                    Self::queue_null_nvlink_status_observation(
+                        &mut pending_null_nvlink_observations,
+                        chassis_serial,
+                        chassis_snapshots,
+                        ChassisNmxCUnreachableReason::PartitionMonitorWorkFailed,
+                    );
+                    0
+                }
+            };
             total_completed_operations += num_completed;
         }
 
@@ -1819,7 +1840,9 @@ impl NvlPartitionMonitor {
         Ok(())
     }
 
-    // Use a separate transaction to record the observations to avoid blocking the main transaction when we poll NMX-C.
+    /// Queues machines on `chassis_serial` for a batched null `nvlink_status_observation` write.
+    ///
+    /// Entries are flushed in one transaction by [`Self::record_null_nvlink_status_observations`].
     fn queue_null_nvlink_status_observation(
         pending: &mut Vec<PendingNullNvlinkObservation>,
         chassis_serial: &str,
@@ -1840,6 +1863,7 @@ impl NvlPartitionMonitor {
         });
     }
 
+    /// Clears `nvlink_status_observation` for all queued chassis in one transaction and updates metrics.
     async fn record_null_nvlink_status_observations(
         &self,
         pending: &[PendingNullNvlinkObservation],
@@ -1886,6 +1910,7 @@ impl NvlPartitionMonitor {
         Ok(())
     }
 
+    // Use a separate transaction to record the observations to avoid blocking the main transaction when we poll NMX-C.
     async fn record_nvlink_status_observation(
         &self,
         observations: HashMap<MachineId, MachineNvLinkStatusObservation>,
