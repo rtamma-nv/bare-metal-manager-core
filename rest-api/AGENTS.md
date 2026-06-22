@@ -181,6 +181,16 @@ verification expectations.
   `api/pkg/api/model/`, and DB models in `db/pkg/db/model/`.
 - OpenAPI schema in `openapi/spec.yaml` must be updated whenever API
   endpoints are added or modified.
+- PUT endpoints that create or replace a resource should use
+  `CreateOrUpdate` naming consistently across handlers, summaries,
+  operation IDs, and generated SDK methods.
+- When a JSON request body exists, put IDs such as `siteId` in that body
+  and validate them on the DTO; use query parameters for filters/read-only
+  selectors.
+- Successful PUT responses should echo accepted non-secret fields, while
+  passwords and other credentials are never returned. Keep OpenAPI
+  descriptions focused on the REST contract rather than internal gRPC
+  implementation details.
 
 ### Prefer range-based iteration over C-style `for` loops
 
