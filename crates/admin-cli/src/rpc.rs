@@ -44,6 +44,7 @@ use carbide_uuid::rack::RackId;
 use carbide_uuid::spx::SpxPartitionId;
 use carbide_uuid::switch::SwitchId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
+use futures::{StreamExt, TryStreamExt, stream};
 use mac_address::MacAddress;
 
 use crate::IntoOnlyOne;
@@ -73,6 +74,9 @@ fn maybe_unimplemented(status: &tonic::Status) -> bool {
         tonic::Code::Unimplemented | tonic::Code::PermissionDenied
     )
 }
+
+// Benchmarks showed 4 had better overall performance while still overlapping page fetch latency.
+const PAGED_LIST_FETCH_CONCURRENCY: usize = 4;
 
 // Note: You do *not* need to add every gRPC method to this wrapper. Callers can use `.0` to get
 // access to the underlying ForgeApiClient, if they want to simply call the gRPC methods themselves.
@@ -112,10 +116,14 @@ impl ApiClient {
             machines: Vec::with_capacity(all_machine_ids.machine_ids.len()),
         };
 
-        for machine_ids in all_machine_ids.machine_ids.chunks(page_size) {
-            let machines = self.get_machines_by_ids(machine_ids).await?;
-            all_machines.machines.extend(machines.machines);
-        }
+        stream::iter(all_machine_ids.machine_ids.chunks(page_size))
+            .map(|machine_ids| self.get_machines_by_ids(machine_ids))
+            .buffered(PAGED_LIST_FETCH_CONCURRENCY)
+            .try_for_each(|machines| {
+                all_machines.machines.extend(machines.machines);
+                futures::future::ok(())
+            })
+            .await?;
 
         Ok(all_machines)
     }
@@ -233,10 +241,14 @@ impl ApiClient {
             instances: Vec::with_capacity(all_ids.instance_ids.len()),
         };
 
-        for ids in all_ids.instance_ids.chunks(page_size) {
-            let list = self.0.find_instances_by_ids(ids.to_vec()).await?;
-            all_list.instances.extend(list.instances);
-        }
+        stream::iter(all_ids.instance_ids.chunks(page_size))
+            .map(|ids| self.0.find_instances_by_ids(ids.to_vec()))
+            .buffered(PAGED_LIST_FETCH_CONCURRENCY)
+            .try_for_each(|list| {
+                all_list.instances.extend(list.instances);
+                futures::future::ok(())
+            })
+            .await?;
 
         Ok(all_list)
     }
@@ -585,10 +597,15 @@ impl ApiClient {
         let mut all_endpoints = ::rpc::site_explorer::ExploredEndpointList {
             endpoints: Vec::with_capacity(endpoint_ids.endpoint_ids.len()),
         };
-        for ids in endpoint_ids.endpoint_ids.chunks(page_size) {
-            let list = self.get_explored_endpoints_by_ids(ids).await?;
-            all_endpoints.endpoints.extend(list.endpoints);
-        }
+
+        stream::iter(endpoint_ids.endpoint_ids.chunks(page_size))
+            .map(|ids| self.get_explored_endpoints_by_ids(ids))
+            .buffered(PAGED_LIST_FETCH_CONCURRENCY)
+            .try_for_each(|list| {
+                all_endpoints.endpoints.extend(list.endpoints);
+                futures::future::ok(())
+            })
+            .await?;
 
         // grab managed hosts
         let all_hosts = self.get_all_explored_managed_hosts(page_size).await?;
@@ -624,10 +641,16 @@ impl ApiClient {
         let mut all_hosts = ::rpc::site_explorer::ExploredManagedHostList {
             managed_hosts: Vec::with_capacity(host_ids.host_ids.len()),
         };
-        for ids in host_ids.host_ids.chunks(page_size) {
-            let list = self.0.find_explored_managed_hosts_by_ids(ids).await?;
-            all_hosts.managed_hosts.extend(list.managed_hosts);
-        }
+
+        stream::iter(host_ids.host_ids.chunks(page_size))
+            .map(|ids| self.0.find_explored_managed_hosts_by_ids(ids))
+            .buffered(PAGED_LIST_FETCH_CONCURRENCY)
+            .try_for_each(|list| {
+                all_hosts.managed_hosts.extend(list.managed_hosts);
+                futures::future::ok(())
+            })
+            .await?;
+
         Ok(all_hosts.managed_hosts)
     }
 
@@ -2281,7 +2304,6 @@ impl ApiClient {
     ) -> CarbideCliResult<RemediationList> {
         let all_remediation_ids = self.0.find_remediation_ids().await?;
 
-        use futures::{StreamExt, TryStreamExt, stream};
         let remediations = stream::iter(all_remediation_ids.remediation_ids.chunks(page_size))
             .then(|remediation_ids| async move {
                 self.0
