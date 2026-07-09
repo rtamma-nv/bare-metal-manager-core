@@ -211,9 +211,10 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    /// Returns true when this GPU reports NVLink platform metadata and an MNNVL family name.
-    pub fn is_mnnvl_capable(&self) -> bool {
-        self.platform_info.is_some() && gpu_name_indicates_mnnvl(&self.name)
+    /// Returns true when this GPU reports NVLink platform metadata and an MNNVL family
+    /// name on the GPU or, when absent there, in DMI `product_name`.
+    pub fn is_mnnvl_capable_with_dmi(&self, dmi_product_name: Option<&str>) -> bool {
+        is_mnnvl_capable_gpu(self, dmi_product_name)
     }
 }
 
@@ -334,9 +335,12 @@ impl HardwareInfo {
     }
 
     /// Returns true when hardware reports at least one GPU with NVLink platform metadata
-    /// and an MNNVL family name (GB200, GB300, etc.).
+    /// and an MNNVL family name on the GPU or, when absent there, in DMI `product_name`.
     pub fn is_mnnvl_capable(&self) -> bool {
-        self.gpus.iter().any(|gpu| gpu.is_mnnvl_capable())
+        let dmi_product_name = self.dmi_data.as_ref().map(|dmi| dmi.product_name.as_str());
+        self.gpus
+            .iter()
+            .any(|gpu| is_mnnvl_capable_gpu(gpu, dmi_product_name))
     }
 
     pub fn is_dgx_h100(&self) -> bool {
@@ -346,7 +350,7 @@ impl HardwareInfo {
     }
 }
 
-/// Substrings matched against discovered GPU `name` values to identify MNNVL-capable hardware.
+/// Substrings matched against GPU `name` or DMI `product_name` to identify MNNVL-capable hardware.
 pub const MNNVL_KNOWN_GPU_NAMES: &[&str] = &["GB200", "GB300", "VR"];
 
 /// Returns true when `name` contains any [`MNNVL_KNOWN_GPU_NAMES`] entry.
@@ -356,13 +360,36 @@ pub fn gpu_name_indicates_mnnvl(name: &str) -> bool {
         .any(|marker| name.contains(marker))
 }
 
-/// Builds the SQL `LIKE` conditions used to match GPU names against [`MNNVL_KNOWN_GPU_NAMES`].
+/// Returns true when a GPU has `platform_info` and its name matches an MNNVL marker, or when
+/// the GPU name does not match and DMI `product_name` does.
+pub fn is_mnnvl_capable_gpu(gpu: &Gpu, dmi_product_name: Option<&str>) -> bool {
+    if gpu.platform_info.is_none() {
+        return false;
+    }
+    if gpu_name_indicates_mnnvl(&gpu.name) {
+        return true;
+    }
+    dmi_product_name.is_some_and(gpu_name_indicates_mnnvl)
+}
+
+/// Builds SQL `LIKE` conditions matching GPU `name` or DMI `product_name` against
+/// [`MNNVL_KNOWN_GPU_NAMES`].
 pub fn mnnvl_gpu_name_sql_like_conditions() -> String {
-    MNNVL_KNOWN_GPU_NAMES
+    let gpu_name_conditions = MNNVL_KNOWN_GPU_NAMES
         .iter()
         .map(|marker| format!("gpu->>'name' LIKE '%{marker}%'"))
         .collect::<Vec<_>>()
-        .join("\n                      OR ")
+        .join("\n                      OR ");
+    let dmi_product_name_conditions = MNNVL_KNOWN_GPU_NAMES
+        .iter()
+        .map(|marker| {
+            format!(
+                "mt.topology->'discovery_data'->'Info'->'dmi_data'->>'product_name' LIKE '%{marker}%'"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n                      OR ");
+    format!("{gpu_name_conditions}\n                      OR {dmi_product_name_conditions}")
 }
 
 #[derive(Debug, Default, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -1002,15 +1029,16 @@ mod tests {
     }
 
     #[test]
-    fn hardware_info_is_mnnvl_capable_ignores_dmi_product_name() {
-        let info = info_with_dmi(
+    fn hardware_info_is_mnnvl_capable_falls_back_to_dmi_product_name() {
+        let mut info = info_with_dmi(
             CpuArchitecture::Aarch64,
             DmiData {
                 product_name: "GB200 NVL".to_string(),
                 ..Default::default()
             },
         );
-        assert!(!info.is_mnnvl_capable());
+        info.gpus.push(gpu_with_platform_info("NVIDIA H100 PCIe"));
+        assert!(info.is_mnnvl_capable());
     }
 
     #[test]
@@ -1018,8 +1046,12 @@ mod tests {
         let sql = mnnvl_gpu_name_sql_like_conditions();
         for marker in MNNVL_KNOWN_GPU_NAMES {
             assert!(
-                sql.contains(marker),
-                "expected SQL filter to include marker {marker:?}, got: {sql}"
+                sql.contains(&format!("gpu->>'name' LIKE '%{marker}%'")),
+                "expected SQL filter to include GPU name marker {marker:?}, got: {sql}"
+            );
+            assert!(
+                sql.contains(&format!("dmi_data'->>'product_name' LIKE '%{marker}%'")),
+                "expected SQL filter to include DMI product_name marker {marker:?}, got: {sql}"
             );
         }
     }
