@@ -210,14 +210,6 @@ pub struct Gpu {
     pub platform_info: Option<GpuPlatformInfo>,
 }
 
-impl Gpu {
-    /// Returns true when this GPU reports NVLink platform metadata and an MNNVL family
-    /// name on the GPU or, when absent there, in DMI `product_name`.
-    pub fn is_mnnvl_capable_with_dmi(&self, dmi_product_name: Option<&str>) -> bool {
-        is_mnnvl_capable_gpu(self, dmi_product_name)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GpuPlatformInfo {
     pub chassis_serial: String,
@@ -351,7 +343,7 @@ impl HardwareInfo {
 }
 
 /// Substrings matched against GPU `name` or DMI `product_name` to identify MNNVL-capable hardware.
-pub const MNNVL_KNOWN_GPU_NAMES: &[&str] = &["GB200", "GB300", "VR"];
+pub const MNNVL_KNOWN_GPU_NAMES: &[&str] = &["GB200", "GB300", "VR NVL"];
 
 /// Returns true when `name` contains any [`MNNVL_KNOWN_GPU_NAMES`] entry.
 pub fn gpu_name_indicates_mnnvl(name: &str) -> bool {
