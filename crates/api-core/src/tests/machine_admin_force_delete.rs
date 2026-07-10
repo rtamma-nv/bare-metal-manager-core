@@ -774,7 +774,7 @@ async fn test_admin_force_delete_with_dpf_uses_bmc_mac(pool: sqlx::PgPool) {
         enabled: true,
         deployments: crate::cfg::file::DpfDeploymentsConfig {
             bf3: crate::cfg::file::DpfDeploymentConfig {
-                bfb_url: "http://example.com/test.bfb".to_string(),
+                bfb_url: Some("http://example.com/test.bfb".to_string()),
                 ..Default::default()
             },
             ..Default::default()
