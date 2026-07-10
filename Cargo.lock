@@ -2355,6 +2355,7 @@ dependencies = [
  "carbide-firmware",
  "carbide-health-metrics",
  "carbide-health-report",
+ "carbide-instrument",
  "carbide-ipmi",
  "carbide-measured-boot",
  "carbide-redfish",
