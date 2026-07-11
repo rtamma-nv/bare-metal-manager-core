@@ -340,6 +340,15 @@ impl HardwareInfo {
             .as_ref()
             .is_some_and(|dmi| dmi.sys_vendor == "NVIDIA" && dmi.product_name == "DGXH100")
     }
+
+    /// Chassis serial from the first GPU `platform_info`, when present and non-empty.
+    pub fn first_gpu_platform_chassis_serial(&self) -> Option<&str> {
+        self.gpus
+            .first()
+            .and_then(|gpu| gpu.platform_info.as_ref())
+            .map(|platform_info| platform_info.chassis_serial.as_str())
+            .filter(|serial| !serial.trim().is_empty())
+    }
 }
 
 /// Substrings matched against GPU `name` or DMI `product_name` to identify MNNVL-capable hardware.
@@ -952,6 +961,18 @@ mod tests {
             "no dmi data is unknown" {
                 HardwareInfo::default() => bmc_vendor::BMCVendor::Unknown,
             }
+        );
+    }
+
+    #[test]
+    fn first_gpu_platform_chassis_serial_reads_first_gpu() {
+        let mut info = HardwareInfo::default();
+        assert_eq!(info.first_gpu_platform_chassis_serial(), None);
+
+        info.gpus.push(gpu_with_platform_info("NVIDIA GB200"));
+        assert_eq!(
+            info.first_gpu_platform_chassis_serial(),
+            Some("chassis-1")
         );
     }
 
