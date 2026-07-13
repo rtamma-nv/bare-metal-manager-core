@@ -592,7 +592,7 @@ mod switch_nvos_info_tests {
         ))
         .expect("mac-only nvos info");
         assert!(mac_only.ip.is_none());
-        assert_eq!(mac_only.mac.as_deref(), Some("b8:3f:d2:1a:44:9d"));
+        assert_eq!(mac_only.mac.as_deref(), Some("B8:3F:D2:1A:44:9D"));
     }
 
     #[test]
