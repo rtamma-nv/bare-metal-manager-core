@@ -113,8 +113,7 @@ pub async fn find_switch(
             // through the model->rpc conversion; only nvos_info is stitched in
             // here from the endpoint lookup.
             rpc::Switch::try_from(s).map(|mut rpc_switch| {
-                rpc_switch.nvos_info = endpoint_info
-                    .and_then(switch_nvos_info_from_endpoint_row);
+                rpc_switch.nvos_info = endpoint_info.and_then(switch_nvos_info_from_endpoint_row);
                 rpc_switch
             })
         })
@@ -189,8 +188,7 @@ pub async fn find_by_ids(
             // through the model->rpc conversion; only nvos_info is stitched in
             // here from the endpoint lookup.
             rpc::Switch::try_from(s).map(|mut rpc_switch| {
-                rpc_switch.nvos_info = endpoint_info
-                    .and_then(switch_nvos_info_from_endpoint_row);
+                rpc_switch.nvos_info = endpoint_info.and_then(switch_nvos_info_from_endpoint_row);
                 rpc_switch
             })
         })
@@ -582,15 +580,13 @@ mod switch_nvos_info_tests {
     #[test]
     fn preserves_ip_and_mac_independently() {
         let ip_only = switch_nvos_info_from_endpoint_row(&endpoint_row(None, Some("10.2.14.52")))
-        .expect("ip-only nvos info");
+            .expect("ip-only nvos info");
         assert_eq!(ip_only.ip.as_deref(), Some("10.2.14.52"));
         assert!(ip_only.mac.is_none());
 
-        let mac_only = switch_nvos_info_from_endpoint_row(&endpoint_row(
-            Some("b8:3f:d2:1a:44:9d"),
-            None,
-        ))
-        .expect("mac-only nvos info");
+        let mac_only =
+            switch_nvos_info_from_endpoint_row(&endpoint_row(Some("b8:3f:d2:1a:44:9d"), None))
+                .expect("mac-only nvos info");
         assert!(mac_only.ip.is_none());
         assert_eq!(mac_only.mac.as_deref(), Some("B8:3F:D2:1A:44:9D"));
     }
