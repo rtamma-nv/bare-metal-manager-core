@@ -89,6 +89,8 @@ fn managed_host_chassis_serial(snapshot: &ManagedHostStateSnapshot) -> Option<St
                 .hardware_info
                 .as_ref()
                 .and_then(HardwareInfo::first_gpu_platform_chassis_serial)
+                .map(str::trim)
+                .filter(|serial| !serial.is_empty())
                 .map(str::to_string)
         })
 }

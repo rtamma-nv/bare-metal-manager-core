@@ -965,18 +965,53 @@ mod tests {
     }
 
     #[test]
-    fn first_gpu_platform_chassis_serial_reads_first_gpu() {
-        let mut info = HardwareInfo::default();
-        assert_eq!(info.first_gpu_platform_chassis_serial(), None);
+    fn first_gpu_platform_chassis_serial() {
+        value_scenarios!(
+            run = |info| info.first_gpu_platform_chassis_serial().map(str::to_string);
+            "no GPUs" {
+                HardwareInfo::default() => None,
+            }
 
-        info.gpus.push(gpu_with_platform_info("NVIDIA GB200"));
-        assert_eq!(
-            info.first_gpu_platform_chassis_serial(),
-            Some("chassis-1")
+            "GPU with missing platform_info" {
+                hardware_info_with_gpu(gpu_without_platform_info("NVIDIA GB200")) => None,
+            }
+
+            "blank chassis serial" {
+                hardware_info_with_gpu(gpu_with_platform_info("NVIDIA GB200", "")) => None,
+            }
+
+            "whitespace-only chassis serial" {
+                hardware_info_with_gpu(gpu_with_platform_info("NVIDIA GB200", "   \t  ")) => None,
+            }
+
+            "valid chassis serial" {
+                hardware_info_with_gpu(gpu_with_platform_info("NVIDIA GB200", "chassis-1"))
+                    => Some("chassis-1".to_string()),
+            }
         );
     }
 
-    fn gpu_with_platform_info(name: &str) -> Gpu {
+    fn hardware_info_with_gpu(gpu: Gpu) -> HardwareInfo {
+        let mut info = HardwareInfo::default();
+        info.gpus.push(gpu);
+        info
+    }
+
+    fn gpu_without_platform_info(name: &str) -> Gpu {
+        Gpu {
+            name: name.to_string(),
+            serial: String::new(),
+            driver_version: String::new(),
+            vbios_version: String::new(),
+            inforom_version: String::new(),
+            total_memory: String::new(),
+            frequency: String::new(),
+            pci_bus_id: String::new(),
+            platform_info: None,
+        }
+    }
+
+    fn gpu_with_platform_info(name: &str, chassis_serial: &str) -> Gpu {
         Gpu {
             name: name.to_string(),
             serial: String::new(),
@@ -987,7 +1022,7 @@ mod tests {
             frequency: String::new(),
             pci_bus_id: String::new(),
             platform_info: Some(GpuPlatformInfo {
-                chassis_serial: "chassis-1".to_string(),
+                chassis_serial: chassis_serial.to_string(),
                 slot_number: 1,
                 tray_index: 1,
                 host_id: 1,
@@ -1003,7 +1038,7 @@ mod tests {
             run = |(gpu_name, has_platform_info)| {
                 let mut info = HardwareInfo::default();
                 if has_platform_info {
-                    info.gpus.push(gpu_with_platform_info(gpu_name));
+                    info.gpus.push(gpu_with_platform_info(gpu_name, "chassis-1"));
                 } else {
                     info.gpus.push(Gpu {
                         name: gpu_name.to_string(),
@@ -1050,7 +1085,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        info.gpus.push(gpu_with_platform_info("NVIDIA H100 PCIe"));
+        info.gpus
+            .push(gpu_with_platform_info("NVIDIA H100 PCIe", "chassis-1"));
         assert!(info.is_mnnvl_capable());
     }
 
