@@ -30,6 +30,7 @@ use bmc_mock::{
 };
 use carbide_network::virtualization::build_dual_stack_list;
 use carbide_uuid::machine::MachineId;
+use rand::RngExt;
 use rpc::forge::{MachineArchitecture, MachineDiscoveryResult, ManagedHostNetworkConfigResponse};
 use rpc::forge_agent_control_response::Action;
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,24 @@ use crate::machine_utils::{
 use crate::{PersistedDpuMachine, PersistedHostMachine};
 
 pub type DpuDhcpRelayHandle = oneshot::Sender<()>;
+
+// RFC 2131 section 4.1's Ethernet example starts at four seconds, doubles to a
+// 64-second base, and adds uniform jitter from -1 through +1 second.
+const DHCP_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(4);
+const DHCP_RETRY_MAX_DELAY: Duration = Duration::from_secs(64);
+const DHCP_RETRY_JITTER_MILLIS: i64 = 1_000;
+
+fn dhcp_retry_delay(retry_attempt: u32, jitter_millis: i64) -> Duration {
+    debug_assert!((-DHCP_RETRY_JITTER_MILLIS..=DHCP_RETRY_JITTER_MILLIS).contains(&jitter_millis));
+
+    let multiplier = 1_u32 << retry_attempt.min(4);
+    let base_delay = DHCP_RETRY_INITIAL_DELAY
+        .saturating_mul(multiplier)
+        .min(DHCP_RETRY_MAX_DELAY);
+    let delay_millis = i64::try_from(base_delay.as_millis()).expect("DHCP retry delay fits in i64")
+        + jitter_millis;
+    Duration::from_millis(u64::try_from(delay_millis).expect("DHCP retry delay is positive"))
+}
 
 fn direct_dhcp_relay_address(
     is_host: bool,
@@ -83,6 +102,7 @@ pub struct MachineStateMachine {
     agent_polling_deadline: Option<(Instant, Timer)>,
     bmc_dhcp_info: Option<DhcpResponseInfo>,
     machine_dhcp_info: Option<DhcpResponseInfo>,
+    dhcp_retry_attempt: u32,
     machine_discovery_result: Option<MachineDiscoveryResult>,
 
     actions: VecDeque<FsmAction>,
@@ -254,6 +274,7 @@ impl MachineStateMachine {
             agent_polling_deadline: None,
             bmc_dhcp_info: None,
             machine_dhcp_info: None,
+            dhcp_retry_attempt: 0,
             machine_discovery_result: None,
             installed_os: initial_os_image,
             live_state: Arc::new(RwLock::new(LiveState {
@@ -294,6 +315,7 @@ impl MachineStateMachine {
             bmc_state: None,
             bmc_injection: Arc::new(InjectionStore::new()),
             machine_dhcp_info: None,
+            dhcp_retry_attempt: 0,
             machine_discovery_result: None,
             machine_on_deadline: None,
             agent_polling_deadline: None,
@@ -391,18 +413,20 @@ impl MachineStateMachine {
                 FsmAction::Dhcp(DhcpType::Bmc) => match self.bmc_dhcp_discovery().await {
                     Ok(bmc_dhcp_info) => {
                         self.bmc_dhcp_info = Some(bmc_dhcp_info);
+                        self.dhcp_retry_attempt = 0;
                         self.actions.pop_front();
                         self.fsm_event(Event::DhcpComplete(DhcpType::Bmc))
                     }
-                    Err(_) => return Some(self.config.run_interval_working),
+                    Err(_) => return Some(self.next_dhcp_retry_delay(DhcpType::Bmc)),
                 },
                 FsmAction::Dhcp(DhcpType::Machine) => match self.machine_dhcp_discovery().await {
                     Ok(machine_dhcp_info) => {
                         self.machine_dhcp_info = Some(machine_dhcp_info);
+                        self.dhcp_retry_attempt = 0;
                         self.actions.pop_front();
                         self.fsm_event(Event::DhcpComplete(DhcpType::Machine))
                     }
-                    Err(_) => return Some(self.config.run_interval_working),
+                    Err(_) => return Some(self.next_dhcp_retry_delay(DhcpType::Machine)),
                 },
                 FsmAction::PxeBootRequest => match self.pxe_boot_request().await {
                     Ok(os_image) => {
@@ -514,6 +538,21 @@ impl MachineStateMachine {
         }
         self.update_live_state();
         None
+    }
+
+    fn next_dhcp_retry_delay(&mut self, dhcp_type: DhcpType) -> Duration {
+        let retry_attempt = self.dhcp_retry_attempt;
+        self.dhcp_retry_attempt = self.dhcp_retry_attempt.saturating_add(1);
+        let jitter_millis =
+            rand::rng().random_range(-DHCP_RETRY_JITTER_MILLIS..=DHCP_RETRY_JITTER_MILLIS);
+        let retry_delay = dhcp_retry_delay(retry_attempt, jitter_millis);
+        tracing::debug!(
+            ?dhcp_type,
+            retry_attempt,
+            retry_delay_milliseconds = retry_delay.as_millis(),
+            "scheduled DHCP retry"
+        );
+        retry_delay
     }
 
     fn fsm_event(&mut self, event: Event) {
@@ -1270,6 +1309,60 @@ mod tests {
                 },
             ],
             |(is_host, host_inband)| direct_dhcp_relay_address(is_host, admin, host_inband),
+        );
+    }
+
+    #[test]
+    fn dhcp_retry_delay_uses_rfc_2131_backoff() {
+        check_values(
+            [
+                Check {
+                    scenario: "first retry with minimum jitter",
+                    input: (0, -1_000),
+                    expect: Duration::from_secs(3),
+                },
+                Check {
+                    scenario: "first retry without jitter",
+                    input: (0, 0),
+                    expect: Duration::from_secs(4),
+                },
+                Check {
+                    scenario: "first retry with maximum jitter",
+                    input: (0, 1_000),
+                    expect: Duration::from_secs(5),
+                },
+                Check {
+                    scenario: "second retry doubles the base",
+                    input: (1, 0),
+                    expect: Duration::from_secs(8),
+                },
+                Check {
+                    scenario: "third retry doubles the base",
+                    input: (2, 0),
+                    expect: Duration::from_secs(16),
+                },
+                Check {
+                    scenario: "fourth retry doubles the base",
+                    input: (3, 0),
+                    expect: Duration::from_secs(32),
+                },
+                Check {
+                    scenario: "fifth retry reaches the cap",
+                    input: (4, 0),
+                    expect: Duration::from_secs(64),
+                },
+                Check {
+                    scenario: "later retry remains capped with minimum jitter",
+                    input: (u32::MAX, -1_000),
+                    expect: Duration::from_secs(63),
+                },
+                Check {
+                    scenario: "later retry remains capped with maximum jitter",
+                    input: (u32::MAX, 1_000),
+                    expect: Duration::from_secs(65),
+                },
+            ],
+            |(retry_attempt, jitter_millis)| dhcp_retry_delay(retry_attempt, jitter_millis),
         );
     }
 }
