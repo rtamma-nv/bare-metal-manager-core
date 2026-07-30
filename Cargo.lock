@@ -2642,6 +2642,7 @@ dependencies = [
  "config-version",
  "duration-str",
  "eyre",
+ "futures",
  "hex",
  "http",
  "libnmxc",
