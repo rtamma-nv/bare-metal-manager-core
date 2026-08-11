@@ -65,9 +65,49 @@ kubectl wait --for=delete ns/nico-rest ns/temporal ns/flow \
     --timeout=120s 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 0b. Observability stack (optional component; harmless no-ops if absent)
+# 0b. NVSwitch PKI (optional component; harmless no-ops if absent)
 # ---------------------------------------------------------------------------
-echo "=== [0b/8] Uninstalling observability stack (if present) ==="
+echo "=== [0b/8] Removing NVSwitch PKI (if present) ==="
+# Honor the same env overrides as nvswitch-pki/setup-nvswitch-pki.sh
+# (SITE_NAME, NICO_NS, CERT_MANAGER_NS); fall back to values.yaml / defaults.
+_VALUES_SITE="$(awk '/^siteName:/{v=$2; gsub(/["'"'"']/,"",v); print v}' \
+    "${SCRIPT_DIR}/values.yaml" 2>/dev/null || true)"
+_CLEAN_SITE="${SITE_NAME:-${_VALUES_SITE}}"
+_CLEAN_NICO_NS="${NICO_NS:-nico-system}"
+_CLEAN_CERT_MANAGER_NS="${CERT_MANAGER_NS:-cert-manager}"
+if [[ -n "${_CLEAN_SITE}" ]]; then
+    kubectl delete certificate \
+        nvswitch-nico-client-certificate -n "${_CLEAN_NICO_NS}" \
+        --ignore-not-found 2>/dev/null || true
+    kubectl delete certificate \
+        "${_CLEAN_SITE}-nvswitch-ca" -n "${_CLEAN_CERT_MANAGER_NS}" \
+        --ignore-not-found 2>/dev/null || true
+    kubectl delete clusterissuer \
+        "${_CLEAN_SITE}-nvswitch-self-issuer" \
+        "${_CLEAN_SITE}-nvswitch-server-issuer" \
+        "${_CLEAN_SITE}-nvswitch-rms-client-issuer" \
+        "${_CLEAN_SITE}-nvswitch-nico-client-issuer" \
+        --ignore-not-found 2>/dev/null || true
+    kubectl delete certificaterequestpolicy \
+        "${_CLEAN_SITE}-nvswitch-ca-policy" \
+        "${_CLEAN_SITE}-nvswitch-server-policy" \
+        "${_CLEAN_SITE}-nvswitch-rms-client-policy" \
+        "${_CLEAN_SITE}-nvswitch-nico-client-policy" \
+        --ignore-not-found 2>/dev/null || true
+    kubectl delete clusterrole \
+        "cert-manager-policy:${_CLEAN_SITE}-nvswitch" \
+        --ignore-not-found 2>/dev/null || true
+    kubectl delete clusterrolebinding \
+        "cert-manager-policy:${_CLEAN_SITE}-nvswitch" \
+        --ignore-not-found 2>/dev/null || true
+else
+    echo "  SITE_NAME/siteName empty — skipping NVSwitch PKI cleanup (resources are site-name-prefixed)"
+fi
+
+# ---------------------------------------------------------------------------
+# 0c. Observability stack (optional component; harmless no-ops if absent)
+# ---------------------------------------------------------------------------
+echo "=== [0c/8] Uninstalling observability stack (if present) ==="
 helm uninstall obs                    -n monitoring 2>/dev/null || true
 helm uninstall otel-agent             -n otel       2>/dev/null || true
 helm uninstall otel-collector-gateway -n otel       2>/dev/null || true

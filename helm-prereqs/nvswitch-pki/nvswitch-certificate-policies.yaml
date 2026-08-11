@@ -1,0 +1,159 @@
+# CertificateRequestPolicies for the NVSwitch PKI.
+# Applied only when approver-policy is installed (setup-nvswitch-pki.sh checks for the CRD).
+#
+# Template: substitute ${SITE_NAME}, ${NICO_NS}, ${NVSWITCH_TLS_DOMAIN},
+# and ${NVSWITCH_SPIFFE_TRUST_DOMAIN} with envsubst before applying.
+---
+apiVersion: policy.cert-manager.io/v1alpha1
+kind: CertificateRequestPolicy
+metadata:
+  name: ${SITE_NAME}-nvswitch-ca-policy
+spec:
+  allowed:
+    commonName:
+      required: true
+      value: ${SITE_NAME}-nvswitch-ca
+    isCA: true
+    usages:
+      - cert sign
+      - crl sign
+  constraints:
+    maxDuration: 87600h
+    minDuration: 87600h
+    privateKey:
+      algorithm: ECDSA
+      minSize: 384
+      maxSize: 384
+  selector:
+    namespace:
+      matchNames:
+        - ${CERT_MANAGER_NS}
+    issuerRef:
+      name: ${SITE_NAME}-nvswitch-self-issuer
+      kind: ClusterIssuer
+      group: cert-manager.io
+---
+apiVersion: policy.cert-manager.io/v1alpha1
+kind: CertificateRequestPolicy
+metadata:
+  name: ${SITE_NAME}-nvswitch-server-policy
+spec:
+  allowed:
+    dnsNames:
+      required: true
+      values:
+        - ${NVSWITCH_TLS_DOMAIN}
+    uris:
+      required: true
+      values:
+        - spiffe://${NVSWITCH_SPIFFE_TRUST_DOMAIN}/${NICO_NS}/sa/${SITE_NAME}-nmxc
+    isCA: false
+    usages:
+      - digital signature
+      - server auth
+      - client auth
+  constraints:
+    minDuration: 320h
+    maxDuration: 720h
+    privateKey:
+      algorithm: ECDSA
+      minSize: 384
+      maxSize: 384
+  selector:
+    namespace:
+      matchNames:
+        - ${NICO_NS}
+    issuerRef:
+      name: ${SITE_NAME}-nvswitch-server-issuer
+      kind: ClusterIssuer
+      group: cert-manager.io
+---
+apiVersion: policy.cert-manager.io/v1alpha1
+kind: CertificateRequestPolicy
+metadata:
+  name: ${SITE_NAME}-nvswitch-rms-client-policy
+spec:
+  allowed:
+    uris:
+      required: true
+      values:
+        - spiffe://${NVSWITCH_SPIFFE_TRUST_DOMAIN}/${NICO_NS}/sa/${SITE_NAME}-rms
+    isCA: false
+    usages:
+      - digital signature
+      - client auth
+  constraints:
+    minDuration: 320h
+    maxDuration: 720h
+    privateKey:
+      algorithm: ECDSA
+      minSize: 384
+      maxSize: 384
+  selector:
+    namespace:
+      matchNames:
+        - ${NICO_NS}
+    issuerRef:
+      name: ${SITE_NAME}-nvswitch-rms-client-issuer
+      kind: ClusterIssuer
+      group: cert-manager.io
+---
+apiVersion: policy.cert-manager.io/v1alpha1
+kind: CertificateRequestPolicy
+metadata:
+  name: ${SITE_NAME}-nvswitch-nico-client-policy
+spec:
+  allowed:
+    uris:
+      required: true
+      values:
+        - spiffe://${NVSWITCH_SPIFFE_TRUST_DOMAIN}/${NICO_NS}/sa/${SITE_NAME}-nico-nmxc
+    isCA: false
+    usages:
+      - digital signature
+      - client auth
+  constraints:
+    minDuration: 320h
+    maxDuration: 720h
+    privateKey:
+      algorithm: ECDSA
+      minSize: 384
+      maxSize: 384
+  selector:
+    namespace:
+      matchNames:
+        - ${NICO_NS}
+    issuerRef:
+      name: ${SITE_NAME}-nvswitch-nico-client-issuer
+      kind: ClusterIssuer
+      group: cert-manager.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-policy:${SITE_NAME}-nvswitch
+rules:
+  - apiGroups:
+      - policy.cert-manager.io
+    resources:
+      - certificaterequestpolicies
+    verbs:
+      - use
+    resourceNames:
+      - ${SITE_NAME}-nvswitch-ca-policy
+      - ${SITE_NAME}-nvswitch-server-policy
+      - ${SITE_NAME}-nvswitch-rms-client-policy
+      - ${SITE_NAME}-nvswitch-nico-client-policy
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cert-manager-policy:${SITE_NAME}-nvswitch
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cert-manager-policy:${SITE_NAME}-nvswitch
+subjects:
+  - kind: ServiceAccount
+    name: cert-manager
+    namespace: ${CERT_MANAGER_NS}

@@ -1,0 +1,61 @@
+# Dedicated, site-scoped CA for NVSwitch control-plane mTLS. The private CA
+# key remains in cert-manager; workload namespaces receive only leaf keys and
+# this CA's public certificate through their cert-manager Secrets.
+#
+# Template: substitute ${SITE_NAME} and ${CERT_MANAGER_NS} with envsubst before applying.
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ${SITE_NAME}-nvswitch-self-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ${SITE_NAME}-nvswitch-ca
+  namespace: ${CERT_MANAGER_NS}
+spec:
+  isCA: true
+  commonName: ${SITE_NAME}-nvswitch-ca
+  secretName: ${SITE_NAME}-nvswitch-ca
+  duration: 87600h0m0s
+  renewBefore: 8760h0m0s
+  usages:
+    - cert sign
+    - crl sign
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+    rotationPolicy: Never
+  issuerRef:
+    name: ${SITE_NAME}-nvswitch-self-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# Separate issuers off the same CA secret so approver-policy can enforce a
+# narrow certificate profile per workload without sharing an issuer name.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ${SITE_NAME}-nvswitch-server-issuer
+spec:
+  ca:
+    secretName: ${SITE_NAME}-nvswitch-ca
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ${SITE_NAME}-nvswitch-rms-client-issuer
+spec:
+  ca:
+    secretName: ${SITE_NAME}-nvswitch-ca
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ${SITE_NAME}-nvswitch-nico-client-issuer
+spec:
+  ca:
+    secretName: ${SITE_NAME}-nvswitch-ca

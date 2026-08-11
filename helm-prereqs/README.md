@@ -38,6 +38,8 @@ For manual phase-by-phase installation (re-running individual phases, debugging 
 
 For the optional site-local monitoring stack (metrics + logs + traces: Prometheus, Grafana, Loki, Tempo, OTEL), see **[observability/README.md](observability/README.md)**.
 
+For the optional site-scoped NVSwitch control-plane mTLS PKI (dedicated CA + ClusterIssuers, NICo client cert mount), see **[nvswitch-pki/README.md](nvswitch-pki/README.md)**.
+
 ## Directory structure
 
 ```
@@ -59,7 +61,8 @@ helm-prereqs/
 ├── operators/                  # Raw manifests and operator values (local-path, MetalLB, cert-manager, Vault, ESO)
 │   └── dpf/                    # DPF manifests/templates (DPF installs by default; --skip-dpf to opt out)
 ├── keycloak/                   # Dev Keycloak deployment and token helper scripts
-└── observability/              # Optional monitoring stack (Loki, Tempo, OTEL, Prometheus, Grafana)
+├── observability/              # Optional monitoring stack (Loki, Tempo, OTEL, Prometheus, Grafana)
+└── nvswitch-pki/               # Optional NVSwitch mTLS PKI (site CA, issuers, nico-api client cert)
 ```
 
 ## Pre-setup checklist
@@ -227,6 +230,7 @@ It supports these common deployment modes:
 | `--skip-dpf` | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Use for sites with no DPUs or that still use the deprecated iPXE DPU path. See [DPF](#dpf). |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Core deploys. |
 | `--with-observability` | Also install the local monitoring stack (metrics + logs + traces) after Core. Runs in every mode, including `--skip-rest`. Can also be run standalone at any time: `observability/install-observability.sh`. See [observability/README.md](observability/README.md). |
+| `--with-nvswitch-pki` | Also set up the site-scoped NVSwitch mTLS PKI after Core (dedicated CA + ClusterIssuers, mounts the NICo client cert into nico-api). Runs in every mode, including `--skip-rest`. Can also be run standalone at any time: `nvswitch-pki/setup-nvswitch-pki.sh`. See [nvswitch-pki/README.md](nvswitch-pki/README.md). |
 | `--debug` | Enable bash tracing. This can print secrets, so avoid it in shared logs. |
 
 `REGISTRY_PULL_SECRET` is optional. When it is unset, setup does not create or
@@ -287,6 +291,10 @@ Observability (opt-in)     (observability/ - only with --with-observability; als
   ├── tempo                 (grafana-community/tempo 2.2.3 - site-local trace store)
   ├── otel-agent            (opentelemetry-collector 0.106.0 - pod logs -> Loki, spans -> Tempo)
   └── otel-collector-gateway (optional, WITH_DPU=true - DPU OTLP/mTLS receiver)
+NVSwitch PKI (opt-in)      (nvswitch-pki/ - only with --with-nvswitch-pki; also standalone)
+  ├── ${SITE}-nvswitch-ca   (Certificate + ClusterIssuers in cert-manager ns)
+  ├── nvswitch-nico-client-certificate (NICo client cert in nico-system)
+  └── nico-api volume mount (/var/run/secrets/nvswitch-client via helm overlay)
 ```
 
 ## DPF

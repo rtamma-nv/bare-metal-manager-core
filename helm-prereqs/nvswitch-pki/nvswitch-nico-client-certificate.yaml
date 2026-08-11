@@ -1,0 +1,29 @@
+# NICo client certificate for nico-api to authenticate to NVSwitches via mTLS.
+# Mounted into nico-api at /var/run/secrets/nvswitch-client/ and referenced by
+# the [nvlink_config] section in the site config TOML.
+#
+# Template: substitute ${SITE_NAME}, ${NICO_NS}, and ${NVSWITCH_SPIFFE_TRUST_DOMAIN}
+# with envsubst before applying.
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nvswitch-nico-client-certificate
+  namespace: ${NICO_NS}
+spec:
+  duration: 720h0m0s
+  renewBefore: 360h0m0s
+  secretName: nvswitch-nico-client-certificate
+  uris:
+    - spiffe://${NVSWITCH_SPIFFE_TRUST_DOMAIN}/${NICO_NS}/sa/${SITE_NAME}-nico-nmxc
+  usages:
+    - digital signature
+    - client auth
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+    rotationPolicy: Always
+  issuerRef:
+    kind: ClusterIssuer
+    name: ${SITE_NAME}-nvswitch-nico-client-issuer
+    group: cert-manager.io

@@ -246,6 +246,12 @@ rms:
 
 extraEnv: []
 
+## Extra volumes and volumeMounts injected into the nico-api pod.
+## Use to mount site-specific secrets (e.g. nvswitch-client-tls for NVSwitch mTLS).
+## See helm-prereqs/nvswitch-pki/values-nvswitch-nico-client.yaml for an example.
+extraVolumes: []
+extraVolumeMounts: []
+
 ## Authentication for the /admin WebUI. CARBIDE_WEB_AUTH_TYPE in extraEnv
 ## takes precedence for compatibility with existing installations.
 webAuth:

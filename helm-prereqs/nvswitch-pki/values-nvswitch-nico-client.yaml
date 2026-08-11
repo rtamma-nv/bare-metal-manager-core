@@ -1,0 +1,18 @@
+# Helm values overlay: mount the NVSwitch NICo client certificate into nico-api.
+# Applied via:
+#   helm upgrade nico <chart> -n nico-system --reuse-values -f values-nvswitch-nico-client.yaml
+#
+# The secret is issued by setup-nvswitch-pki.sh before this upgrade runs.
+#
+# WARNING: Helm replaces list values (does not deep-merge). Another -f overlay
+# that sets nico-api.extraVolumes / extraVolumeMounts will overwrite these
+# entries — keep all extras in one values file when combining overlays.
+nico-api:
+  extraVolumes:
+    - name: nvswitch-client-tls
+      secret:
+        secretName: nvswitch-nico-client-certificate
+  extraVolumeMounts:
+    - name: nvswitch-client-tls
+      mountPath: /var/run/secrets/nvswitch-client
+      readOnly: true

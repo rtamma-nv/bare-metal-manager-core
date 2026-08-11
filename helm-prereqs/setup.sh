@@ -122,6 +122,9 @@
 #                                       #   OTEL collector, Prometheus, Grafana) after Core —
 #                                       #   see helm-prereqs/observability/README.md; can also be
 #                                       #   run standalone/later: observability/install-observability.sh
+#   ./setup.sh --with-nvswitch-pki      # also set up the site-scoped NVSwitch mTLS PKI after Core —
+#                                       #   see helm-prereqs/nvswitch-pki/README.md; can also be
+#                                       #   run standalone/later: nvswitch-pki/setup-nvswitch-pki.sh
 #   ./setup.sh --debug                  # enable bash -x trace (or run: bash -x ./setup.sh)
 #
 # Notes:
@@ -145,6 +148,7 @@ SKIP_FLOW=false
 INSTALL_DPF="${NICO_INSTALL_DPF:-true}"
 [[ "${NICO_SKIP_DPF:-false}" == "true" ]] && INSTALL_DPF=false
 WITH_OBSERVABILITY="${WITH_OBSERVABILITY:-false}"
+WITH_NVSWITCH_PKI="${WITH_NVSWITCH_PKI:-false}"
 CORE_VALUES=""
 METALLB_CONFIG=""
 SITE_OVERLAY=""
@@ -157,6 +161,7 @@ while [[ $# -gt 0 ]]; do
         --install-dpf)  INSTALL_DPF=true ;;   # explicit; DPF is the default
         --skip-dpf)     INSTALL_DPF=false ;;
         --with-observability) WITH_OBSERVABILITY=true ;;
+        --with-nvswitch-pki)  WITH_NVSWITCH_PKI=true  ;;
         --debug)        set -x         ;;
         --core-values)
             [[ -z "${2:-}" ]] && { echo "Error: --core-values requires a file path"; exit 1; }
@@ -173,7 +178,7 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-flow] [--skip-dpf] [--with-observability] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-flow] [--skip-dpf] [--with-observability] [--with-nvswitch-pki] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
@@ -1367,6 +1372,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# NVSwitch PKI (optional) — site-scoped CA + ClusterIssuers for NVSwitch
+# control-plane mTLS. Runs AFTER Core (Phase 6) so the nico helm release
+# exists for the volume-mount upgrade. Self-contained and idempotent;
+# can also be run standalone at any later time:
+#   helm-prereqs/nvswitch-pki/setup-nvswitch-pki.sh
+# Docs: helm-prereqs/nvswitch-pki/README.md
+# ---------------------------------------------------------------------------
+_NVSWITCH_PKI_INSTALLED=false
+if "${WITH_NVSWITCH_PKI}"; then
+    echo ""
+    _SETUP_PHASE="nvswitch-pki"
+    echo "=== NVSwitch PKI (--with-nvswitch-pki) ==="
+    # NICO_HELM_UPGRADE=true is safe in this integrated path — Core was just
+    # installed from this same tree, so the release upgrade the installer
+    # performs touches only the extraVolumes/extraVolumeMounts fields.
+    if NICO_HELM_UPGRADE="${NICO_HELM_UPGRADE:-true}" \
+        "${SCRIPT_DIR}/nvswitch-pki/setup-nvswitch-pki.sh"; then
+        _NVSWITCH_PKI_INSTALLED=true
+    else
+        echo "WARNING: nvswitch-pki install failed (optional component) — continuing."
+        echo "         Re-run it any time: ${SCRIPT_DIR}/nvswitch-pki/setup-nvswitch-pki.sh"
+    fi
+else
+    echo ""
+    echo "=== NVSwitch PKI — skipped (pass --with-nvswitch-pki or run nvswitch-pki/setup-nvswitch-pki.sh later) ==="
+fi
+
+# ---------------------------------------------------------------------------
 # 7. NICo REST full stack
 #    Order of operations:
 #      7a. Resolve NICo REST repo + CA signing secret
@@ -2063,6 +2096,10 @@ echo ""
 echo "  Keycloak deep-dive (realm, clients, roles): helm-prereqs/keycloak/README.md"
 if "${_OBSERVABILITY_INSTALLED}"; then
     echo "  Grafana (observability): kubectl -n monitoring port-forward svc/obs-grafana 3000:80"
+fi
+if "${_NVSWITCH_PKI_INSTALLED}"; then
+    echo "  NVSwitch PKI: kubectl get certificate nvswitch-nico-client-certificate -n nico-system"
+    echo "    Next: add [nvlink_config] TLS paths to site config — see helm-prereqs/nvswitch-pki/README.md"
 fi
 echo "========================================================================="
 
