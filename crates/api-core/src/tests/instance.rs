@@ -8693,6 +8693,7 @@ async fn test_allocate_instance_with_extension_services(
                 data: create_dpu_extension_service_data("test-service"),
                 credential: None,
                 observability: None,
+                ..Default::default()
             },
         ))
         .await?
@@ -8715,6 +8716,7 @@ async fn test_allocate_instance_with_extension_services(
                     .unwrap()
                     .version
                     .clone(),
+                ..Default::default()
             }],
         }),
         power_profile: None,
@@ -8778,6 +8780,7 @@ async fn test_allocate_instance_with_extension_services_rejected_on_dpf_host(
                     service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                         service_id: service.service_id,
                         version: service.latest_version_info.unwrap().version,
+                        ..Default::default()
                     }],
                 }),
                 power_profile: None,
@@ -8842,6 +8845,7 @@ async fn create_dpu_extension_services(
                 data: create_dpu_extension_service_data("test-service1-v1"),
                 credential: None,
                 observability: None,
+                ..Default::default()
             },
         ))
         .await?
@@ -8876,6 +8880,7 @@ async fn create_dpu_extension_services(
                 data: create_dpu_extension_service_data("test-service2-v1"),
                 credential: None,
                 observability: None,
+                ..Default::default()
             },
         ))
         .await?
@@ -8893,6 +8898,7 @@ async fn create_dpu_extension_services(
                 data: create_dpu_extension_service_data("test-service3-v1"),
                 credential: None,
                 observability: None,
+                ..Default::default()
             },
         ))
         .await?
@@ -8936,6 +8942,7 @@ async fn test_allocate_instance_with_duplicate_extension_services(
                                 .unwrap()
                                 .version
                                 .clone(),
+                            ..Default::default()
                         },
                         rpc::forge::InstanceDpuExtensionServiceConfig {
                             service_id: service1.service_id.clone(),
@@ -8945,6 +8952,7 @@ async fn test_allocate_instance_with_duplicate_extension_services(
                                 .unwrap()
                                 .version
                                 .clone(),
+                            ..Default::default()
                         },
                     ],
                 }),
@@ -9010,6 +9018,7 @@ async fn test_update_instance_with_extension_services(
             service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                 service_id: service1.service_id.clone(),
                 version: service1_version1.clone(),
+                ..Default::default()
             }],
         }),
         power_profile: None,
@@ -9050,14 +9059,17 @@ async fn test_update_instance_with_extension_services(
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service1.service_id.clone(),
                     version: service1_version2.clone(),
+                    ..Default::default()
                 },
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service2.service_id.clone(),
                     version: service2_version.clone(),
+                    ..Default::default()
                 },
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service3.service_id.clone(),
                     version: service3_version.clone(),
+                    ..Default::default()
                 },
             ],
         }),
@@ -9238,6 +9250,7 @@ async fn test_update_instance_with_extension_services(
             service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                 service_id: service1.service_id.clone(),
                 version: service3_version.clone(),
+                ..Default::default()
             }],
         }),
         power_profile: None,
@@ -9275,10 +9288,12 @@ async fn test_update_instance_with_extension_services(
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service1.service_id.clone(),
                     version: service1_version1.clone(),
+                    ..Default::default()
                 },
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service1.service_id.clone(),
                     version: service1_version2.clone(),
+                    ..Default::default()
                 },
             ],
         }),
@@ -9345,6 +9360,7 @@ async fn test_attach_extension_service_rejected_on_dpf_host(
                     service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                         service_id: service.service_id,
                         version: service.latest_version_info.unwrap().version,
+                        ..Default::default()
                     }],
                 }),
                 power_profile: None,
@@ -9400,6 +9416,7 @@ async fn test_extension_service_removed_after_all_dpus_report_terminated(
             service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                 service_id: service2.service_id.clone(),
                 version: service2_version,
+                ..Default::default()
             }],
         }),
         power_profile: None,
@@ -9570,6 +9587,7 @@ async fn test_extension_services_status_observation(
             service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                 service_id: service1.service_id.clone(),
                 version: versions[0].version_string(),
+                ..Default::default()
             }],
         }),
         power_profile: None,

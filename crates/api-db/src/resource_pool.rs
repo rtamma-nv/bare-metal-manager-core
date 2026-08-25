@@ -278,9 +278,70 @@ where
     T: ToString + FromStr + Send + Sync + 'static,
     <T as FromStr>::Err: std::error::Error,
 {
+    allocate_inner(
+        value,
+        txn,
+        owner_type,
+        owner_id,
+        requested_value,
+        AllocationOrder::Random,
+    )
+    .await
+}
+
+/// Like [`allocate`] with auto-assignment, but picks the numerically lowest
+/// free value instead of a random one. Only valid for pools whose values are
+/// integers (the ordering casts the stored text value to bigint).
+///
+/// Used for `service_vpc_index`, whose contract is "next lowest available
+/// index" so per-tenant indices stay dense.
+pub async fn allocate_lowest<T>(
+    value: &ResourcePool<T>,
+    txn: &mut PgConnection,
+    owner_type: OwnerType,
+    owner_id: &str,
+) -> Result<T, ResourcePoolDatabaseError>
+where
+    T: ToString + FromStr + Send + Sync + 'static,
+    <T as FromStr>::Err: std::error::Error,
+{
+    allocate_inner(
+        value,
+        txn,
+        owner_type,
+        owner_id,
+        None,
+        AllocationOrder::LowestInteger,
+    )
+    .await
+}
+
+/// Free-value selection order for [`allocate_inner`].
+enum AllocationOrder {
+    Random,
+    LowestInteger,
+}
+
+async fn allocate_inner<T>(
+    value: &ResourcePool<T>,
+    txn: &mut PgConnection,
+    owner_type: OwnerType,
+    owner_id: &str,
+    requested_value: Option<T>,
+    order: AllocationOrder,
+) -> Result<T, ResourcePoolDatabaseError>
+where
+    T: ToString + FromStr + Send + Sync + 'static,
+    <T as FromStr>::Err: std::error::Error,
+{
     let auto_assign = requested_value.is_none();
 
-    let query = "
+    let order_by = match order {
+        AllocationOrder::Random => "random()",
+        AllocationOrder::LowestInteger => "(value::bigint) ASC",
+    };
+    let query = format!(
+        "
 WITH allocate AS (
  SELECT id, value FROM resource_pool
     WHERE
@@ -290,7 +351,7 @@ WITH allocate AS (
         -- Either auto_assign is true or we only want
         -- the requested value.
         AND (auto_assign='t' OR value=$5)
-    ORDER BY random()
+    ORDER BY {order_by}
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
@@ -300,7 +361,12 @@ UPDATE resource_pool SET
 FROM allocate
 WHERE resource_pool.id = allocate.id
 RETURNING allocate.value
-";
+"
+    );
+    let query = query.as_str();
+    // The only interpolated fragment is the constant ORDER BY above; binds
+    // carry all caller data.
+    let sql = sqlx::AssertSqlSafe(query);
     let free_state = ResourcePoolEntryState::Free;
     let allocated_state = ResourcePoolEntryState::Allocated {
         owner: owner_id.to_string(),
@@ -310,7 +376,7 @@ RETURNING allocate.value
     let req = requested_value.map(|v| v.to_string());
     // TODO: We should probably update the `state_version` field too. But
     // it's hard to do this inside the SQL query.
-    let allocation = sqlx::query_scalar::<_, String>(query)
+    let allocation = sqlx::query_scalar::<_, String>(sql)
         .bind(&value.name)
         .bind(sqlx::types::Json(&free_state))
         .bind(sqlx::types::Json(&allocated_state))
@@ -373,6 +439,35 @@ RETURNING allocate.value
             owner_id: owner_id.to_string(),
         })?;
     Ok(out)
+}
+
+/// Serializes allocations for one pool for the rest of the transaction.
+///
+/// `allocate` locks only existing rows, so two transactions that both observe
+/// "no allocation yet" for the same owner (via [`find_owned_allocation`]) can
+/// otherwise each allocate a distinct value for that owner — corrupting the
+/// state of pools whose contract is one value per owner. Callers implementing
+/// find-or-allocate must take this lock before the lookup (same idiom as the
+/// tenant lock in `site_prefix.rs`).
+pub async fn lock_pool<T>(
+    pool: &ResourcePool<T>,
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError>
+where
+    T: ToString + FromStr + Send + Sync + 'static,
+    <T as FromStr>::Err: std::error::Error,
+{
+    let query = r#"
+        SELECT pg_advisory_xact_lock(
+            hashtextextended('resource_pool:' || $1, 0)
+        )
+    "#;
+    sqlx::query(query)
+        .bind(pool.name())
+        .execute(&mut *txn)
+        .await
+        .map(|_| ())
+        .map_err(|e| DatabaseError::query(query, e))
 }
 
 /// Returns the value already reserved by one owner in this pool.
@@ -473,6 +568,43 @@ WHERE name = $2 AND value = $3
         return Err(error);
     }
     Ok(())
+}
+
+/// Releases every `service_vpc_index` allocation held by `owner_id` (a service
+/// VPC id) across all per-tenant `service-vpc-index:*` pools. Used when the
+/// owning extension-service registration is deleted.
+///
+/// Release-on-last-detach (gated on DPF-side cleanup acknowledgement, per the
+/// DPU block-storage design) is deferred to the DPU config-delivery increment.
+pub async fn release_service_vpc_indices(
+    txn: &mut PgConnection,
+    owner_id: &str,
+) -> Result<u64, DatabaseError> {
+    let allocated_state = ResourcePoolEntryState::Allocated {
+        owner: owner_id.to_string(),
+        owner_type: OwnerType::ServiceVpc.to_string(),
+    };
+    // Find the owner's entries across the per-tenant pools, then release each
+    // through `release()` so its semantics and failure instrumentation apply.
+    let query = "SELECT name, value FROM resource_pool
+        WHERE name LIKE $1 AND state = $2
+        FOR UPDATE";
+    let entries: Vec<(String, String)> = sqlx::query_as(query)
+        .bind(format!(
+            "{}:%",
+            model::resource_pool::common::SERVICE_VPC_INDEX_PREFIX
+        ))
+        .bind(sqlx::types::Json(&allocated_state))
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    let released = entries.len() as u64;
+    for (pool_name, value) in entries {
+        let pool = ResourcePool::<String>::new(pool_name, model::resource_pool::ValueType::Integer);
+        release(&pool, &mut *txn, value).await?;
+    }
+    Ok(released)
 }
 
 pub async fn stats<'c, E>(executor: E, name: &str) -> Result<ResourcePoolStats, DatabaseError>
@@ -2983,6 +3115,109 @@ mod tests {
             !pool_rows.iter().any(|s| s.name == "orphaned-snapshot"),
             "anomaly path must not auto-seed the missing pool"
         );
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// `service_vpc_index` pools are scoped per consumer tenant: the same
+    /// value must be independently allocatable in two tenants' pools, and
+    /// `find_owned_allocation` must return the stable value for the owning
+    /// service VPC.
+    #[crate::sqlx_test]
+    async fn service_vpc_index_per_tenant_pools(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+
+        let tenant_a = ResourcePool::<u32>::new(
+            model::resource_pool::common::service_vpc_index_pool_name("tenant-a"),
+            ValueType::Integer,
+        );
+        let tenant_b = ResourcePool::<u32>::new(
+            model::resource_pool::common::service_vpc_index_pool_name("tenant-b"),
+            ValueType::Integer,
+        );
+        populate(&tenant_a, &mut txn, (0..4).collect(), true).await?;
+        populate(&tenant_b, &mut txn, (0..4).collect(), true).await?;
+
+        let vpc_x = "9c5405fe-2b6f-4bd2-a0c1-3d0c1c1f6a01";
+        let vpc_y = "9c5405fe-2b6f-4bd2-a0c1-3d0c1c1f6a02";
+
+        // Both tenants can hold index 0, for different (or the same) VPCs.
+        let a0 = allocate_lowest(&tenant_a, &mut txn, OwnerType::ServiceVpc, vpc_x).await?;
+        let b0 = allocate_lowest(&tenant_b, &mut txn, OwnerType::ServiceVpc, vpc_x).await?;
+        assert_eq!(a0, 0);
+        assert_eq!(b0, 0);
+
+        // A second VPC in tenant A gets the next index.
+        let a1 = allocate_lowest(&tenant_a, &mut txn, OwnerType::ServiceVpc, vpc_y).await?;
+        assert_eq!(a1, 1);
+
+        // Stable reuse: the owning VPC finds its existing allocation.
+        assert_eq!(
+            find_owned_allocation(&tenant_a, &mut txn, OwnerType::ServiceVpc, vpc_x).await?,
+            Some(0)
+        );
+        assert_eq!(
+            find_owned_allocation(&tenant_a, &mut txn, OwnerType::ServiceVpc, vpc_y).await?,
+            Some(1)
+        );
+        assert_eq!(
+            find_owned_allocation(&tenant_b, &mut txn, OwnerType::ServiceVpc, vpc_y).await?,
+            None
+        );
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// `release_service_vpc_indices` frees a service VPC's allocations across
+    /// every tenant pool, and only those.
+    #[crate::sqlx_test]
+    async fn service_vpc_index_release_across_tenant_pools(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+
+        let tenant_a = ResourcePool::<u32>::new(
+            model::resource_pool::common::service_vpc_index_pool_name("tenant-a"),
+            ValueType::Integer,
+        );
+        let tenant_b = ResourcePool::<u32>::new(
+            model::resource_pool::common::service_vpc_index_pool_name("tenant-b"),
+            ValueType::Integer,
+        );
+        populate(&tenant_a, &mut txn, (0..4).collect(), true).await?;
+        populate(&tenant_b, &mut txn, (0..4).collect(), true).await?;
+
+        let vpc_x = "9c5405fe-2b6f-4bd2-a0c1-3d0c1c1f6a01";
+        let vpc_y = "9c5405fe-2b6f-4bd2-a0c1-3d0c1c1f6a02";
+
+        allocate_lowest(&tenant_a, &mut txn, OwnerType::ServiceVpc, vpc_x).await?;
+        allocate_lowest(&tenant_b, &mut txn, OwnerType::ServiceVpc, vpc_x).await?;
+        allocate_lowest(&tenant_a, &mut txn, OwnerType::ServiceVpc, vpc_y).await?;
+
+        let released = release_service_vpc_indices(&mut txn, vpc_x).await?;
+        assert_eq!(released, 2, "vpc_x held one index in each tenant pool");
+
+        // vpc_x allocations are gone in both pools; vpc_y is untouched.
+        assert_eq!(
+            find_owned_allocation(&tenant_a, &mut txn, OwnerType::ServiceVpc, vpc_x).await?,
+            None
+        );
+        assert_eq!(
+            find_owned_allocation(&tenant_b, &mut txn, OwnerType::ServiceVpc, vpc_x).await?,
+            None
+        );
+        assert_eq!(
+            find_owned_allocation(&tenant_a, &mut txn, OwnerType::ServiceVpc, vpc_y).await?,
+            Some(1)
+        );
+
+        // Released values are allocatable again, and index 0 comes back first.
+        let re = allocate_lowest(&tenant_a, &mut txn, OwnerType::ServiceVpc, vpc_x).await?;
+        assert_eq!(re, 0);
 
         txn.rollback().await?;
         Ok(())

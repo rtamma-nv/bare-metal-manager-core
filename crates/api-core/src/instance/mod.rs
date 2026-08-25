@@ -1464,6 +1464,151 @@ pub(crate) fn sort_ib_by_slot(
     ib_hw_map
 }
 
+/// Derives service-VPC bindings for the active extension services in
+/// `extension_services` from their registrations, and assigns each bound
+/// service its stable per-(tenant, service VPC) `service_vpc_index` from the
+/// tenant's resource pool. The index is system-assigned: caller-supplied
+/// values are only accepted when they echo the derived binding, since
+/// complete-replace updates round-trip previous responses.
+///
+/// Shared by instance allocation and instance config updates.
+pub(crate) async fn assign_service_vpc_bindings(
+    extension_services: &mut model::instance::config::extension_services::InstanceExtensionServicesConfig,
+    tenant_organization_id: &str,
+    max_service_vpcs_per_tenant: u32,
+    txn: &mut sqlx::PgConnection,
+) -> Result<(), CarbideError> {
+    let active_ids: Vec<_> = extension_services
+        .active_services()
+        .iter()
+        .map(|s| s.service_id)
+        .collect();
+    if active_ids.is_empty() {
+        return Ok(());
+    }
+
+    let registrations = db::extension_service::find_by_ids(&mut *txn, &active_ids, false).await?;
+    let registrations_by_id: HashMap<_, _> = registrations.into_iter().map(|s| (s.id, s)).collect();
+    let pool = model::resource_pool::ResourcePool::<u32>::new(
+        model::resource_pool::common::service_vpc_index_pool_name(tenant_organization_id),
+        model::resource_pool::ValueType::Integer,
+    );
+
+    // Taken lazily, on the first service that actually needs a new index.
+    // Pure-reuse lookups run without it: an existing allocation cannot be
+    // released concurrently, because both this path and the releasing
+    // registration-delete hold the extension-service row locks taken above.
+    let mut pool_locked = false;
+
+    for service in extension_services
+        .service_configs
+        .iter_mut()
+        .filter(|s| s.removed.is_none())
+    {
+        // Existence of the registration is validated (with row locks) by the
+        // callers before bindings are assigned.
+        let Some(registration) = registrations_by_id.get(&service.service_id) else {
+            continue;
+        };
+        let Some(service_vpc_id) = registration.service_vpc_id else {
+            if service.service_vpc_id.is_some() || service.service_vpc_index.is_some() {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "extension service {} is not bound to a service VPC; \
+                     service_vpc_id/service_vpc_index must not be set",
+                    service.service_id
+                )));
+            }
+            continue;
+        };
+
+        if let Some(requested_vpc) = service.service_vpc_id
+            && requested_vpc != service_vpc_id
+        {
+            return Err(CarbideError::InvalidArgument(format!(
+                "extension service {} is bound to service VPC {service_vpc_id}, \
+                 not {requested_vpc}",
+                service.service_id
+            )));
+        }
+
+        let owner_id = service_vpc_id.to_string();
+        let mut existing = db::resource_pool::find_owned_allocation(
+            &pool,
+            &mut *txn,
+            model::resource_pool::OwnerType::ServiceVpc,
+            &owner_id,
+        )
+        .await
+        .map_err(db::DatabaseError::from)?;
+        if existing.is_none() && !pool_locked {
+            // Serialize first-time index derivation per tenant pool. Without
+            // this, two transactions first-binding the same service VPC both
+            // observe "no allocation yet" (there is no row to lock) and each
+            // allocate a distinct index, corrupting the one-index-per-VPC
+            // pool state.
+            db::resource_pool::lock_pool(&pool, &mut *txn).await?;
+            pool_locked = true;
+            // Lazily seed this tenant's index pool; a no-op if it exists.
+            db::resource_pool::populate(
+                &pool,
+                &mut *txn,
+                (0..max_service_vpcs_per_tenant).collect(),
+                true,
+            )
+            .await?;
+            // Re-check under the lock: a concurrent transaction may have
+            // allocated between the unlocked lookup and lock acquisition.
+            existing = db::resource_pool::find_owned_allocation(
+                &pool,
+                &mut *txn,
+                model::resource_pool::OwnerType::ServiceVpc,
+                &owner_id,
+            )
+            .await
+            .map_err(db::DatabaseError::from)?;
+        }
+        let index = match existing {
+            Some(index) => index,
+            None => db::resource_pool::allocate_lowest(
+                &pool,
+                &mut *txn,
+                model::resource_pool::OwnerType::ServiceVpc,
+                &owner_id,
+            )
+            .await
+            .map_err(|e| {
+                db::resource_pool::emit_allocation_failure(
+                    model::resource_pool::ValueType::Integer,
+                    &owner_id,
+                    false,
+                    pool.name(),
+                    &e,
+                );
+                CarbideError::FailedPrecondition(format!(
+                    "cannot allocate service_vpc_index for tenant \
+                     `{tenant_organization_id}` \
+                     (max_service_vpcs_per_tenant={max_service_vpcs_per_tenant}): {e}"
+                ))
+            })?,
+        };
+
+        if let Some(requested_index) = service.service_vpc_index
+            && requested_index != index
+        {
+            return Err(CarbideError::InvalidArgument(format!(
+                "service_vpc_index is system-assigned; extension service {} \
+                 has index {index}, not {requested_index}",
+                service.service_id
+            )));
+        }
+
+        service.service_vpc_id = Some(service_vpc_id);
+        service.service_vpc_index = Some(index);
+    }
+
+    Ok(())
+}
+
 /// Allocates an instance for a tenant
 /// This is a convenience wrapper around `batch_allocate_instances` for single instance allocation.
 pub(crate) async fn allocate_instance(
@@ -1805,6 +1950,22 @@ pub(crate) async fn batch_allocate_instances(
                     service.service_id, service.version,
                 )));
             }
+        }
+
+        // Derive service-VPC bindings and assign each bound service its
+        // stable per-(tenant, service VPC) index.
+        for request in requests.iter_mut() {
+            if request.config.extension_services.service_configs.is_empty() {
+                continue;
+            }
+            let tenant_organization_id = request.config.tenant.tenant_organization_id.to_string();
+            assign_service_vpc_bindings(
+                &mut request.config.extension_services,
+                &tenant_organization_id,
+                api.runtime_config.max_service_vpcs_per_tenant,
+                txn.as_mut(),
+            )
+            .await?;
         }
     }
 

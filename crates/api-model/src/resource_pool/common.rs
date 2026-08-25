@@ -47,6 +47,19 @@ pub const VPC_DPU_LOOPBACK: &str = "vpc-dpu-lo";
 // DPA VNI pool: VNI for the DPA
 pub const DPA_VNI: &str = "dpa-vni";
 
+/// Prefix for per-tenant service-VPC-index pools. Unlike the static pools
+/// above, these are created lazily (one per consumer tenant) on first
+/// extension-service VPC attachment; values are 0..max_service_vpcs_per_tenant.
+pub const SERVICE_VPC_INDEX_PREFIX: &str = "service-vpc-index";
+
+/// Returns the name of the per-tenant pool holding `service_vpc_index` values
+/// for one consumer tenant. Pool values are unique per (pool, value), which
+/// scopes index uniqueness to the tenant; the same index can exist in other
+/// tenants' pools.
+pub fn service_vpc_index_pool_name(tenant_organization_id: &str) -> String {
+    format!("{SERVICE_VPC_INDEX_PREFIX}:{tenant_organization_id}")
+}
+
 /// Returns the name of the resource pool used for a certain IB fabric
 pub fn ib_pkey_pool_name(fabric: &str) -> String {
     format!("ib_fabrics.{fabric}.pkey")

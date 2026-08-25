@@ -78,6 +78,7 @@ impl From<ExtensionServiceSnapshot> for rpc::DpuExtensionService {
             description: snapshot.description,
             created: snapshot.created.to_string(),
             updated: snapshot.updated.to_string(),
+            service_vpc_id: snapshot.service_vpc_id,
         }
     }
 }

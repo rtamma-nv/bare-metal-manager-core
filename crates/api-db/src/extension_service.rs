@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 
 use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::vpc::VpcId;
 use config_version::{ConfigVersion, ConfigVersionChange};
 use model::extension_service::{
     ExtensionService, ExtensionServiceObservability, ExtensionServiceSnapshot,
@@ -53,14 +54,15 @@ pub async fn create(
     data: &str,
     observability: Option<ExtensionServiceObservability>,
     has_credential: bool,
+    service_vpc_id: Option<&VpcId>,
 ) -> Result<(ExtensionService, ExtensionServiceVersionInfo), DatabaseError> {
     let initial_version_ctr = 1;
 
     // First create the extension service record
     let service_query = "INSERT INTO extension_services
-            (id, type, name, description, tenant_organization_id, version_ctr)
-            VALUES ($1, $2::varchar, $3::varchar, $4::varchar, $5::varchar, $6::integer) 
-            RETURNING id, type, name, description, tenant_organization_id, version_ctr, created, updated, deleted";
+            (id, type, name, description, tenant_organization_id, version_ctr, service_vpc_id)
+            VALUES ($1, $2::varchar, $3::varchar, $4::varchar, $5::varchar, $6::integer, $7)
+            RETURNING id, type, name, description, tenant_organization_id, version_ctr, service_vpc_id, created, updated, deleted";
 
     let service = match sqlx::query_as::<_, ExtensionService>(service_query)
         .bind(service_id)
@@ -69,6 +71,7 @@ pub async fn create(
         .bind(description.unwrap_or(""))
         .bind(tenant_organization_id.to_string())
         .bind(initial_version_ctr)
+        .bind(service_vpc_id)
         .fetch_one(&mut *txn)
         .await
     {
@@ -154,7 +157,7 @@ pub async fn update(
         .push(" AND version_ctr = ")
         .push_bind(config_version_change.current.version_nr().cast_signed());
     builder.push(" AND deleted IS NULL");
-    builder.push(" RETURNING id, type, name, description, tenant_organization_id, version_ctr, created, updated, deleted");
+    builder.push(" RETURNING id, type, name, description, tenant_organization_id, version_ctr, service_vpc_id, created, updated, deleted");
 
     let updated_service = match builder
         .build_query_as::<ExtensionService>()
@@ -224,7 +227,7 @@ pub async fn update_metadata(
     builder.push(" WHERE id = ");
     builder.push_bind(service_id);
     builder.push(" AND deleted IS NULL");
-    builder.push(" RETURNING id, type, name, description, tenant_organization_id, version_ctr, created, updated, deleted");
+    builder.push(" RETURNING id, type, name, description, tenant_organization_id, version_ctr, service_vpc_id, created, updated, deleted");
 
     let updated_service = match builder
         .build_query_as::<ExtensionService>()
@@ -306,6 +309,20 @@ pub async fn find_ids(
         .map_err(|e| DatabaseError::query(builder.sql(), e))
 }
 
+/// Returns the ids of non-deleted extension services bound to `vpc_id` as
+/// their service VPC.
+pub async fn find_ids_by_service_vpc(
+    txn: &mut PgConnection,
+    vpc_id: &VpcId,
+) -> DatabaseResult<Vec<ExtensionServiceId>> {
+    let query = "SELECT id FROM extension_services WHERE deleted IS NULL AND service_vpc_id = $1";
+    sqlx::query_scalar(query)
+        .bind(vpc_id)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 /// Finds extension services by their IDs.
 ///
 /// # Parameters
@@ -322,7 +339,7 @@ pub async fn find_by_ids(
     }
 
     let mut builder = sqlx::QueryBuilder::new(
-        "SELECT id, type, name, description, tenant_organization_id, version_ctr, created, updated, deleted FROM
+        "SELECT id, type, name, description, tenant_organization_id, version_ctr, service_vpc_id, created, updated, deleted FROM
          extension_services WHERE deleted IS NULL AND id = ANY(",
     );
     builder.push_bind(ids);
@@ -366,6 +383,7 @@ pub async fn find_snapshots_by_ids(
         s.version_ctr AS version_ctr,
         s.description AS description,
         s.tenant_organization_id AS tenant_organization_id,
+        s.service_vpc_id AS service_vpc_id,
         s.created AS created,
         s.updated AS updated,
         s.deleted AS deleted,
@@ -799,6 +817,7 @@ mod test_batched_lookups {
                 "some-data",
                 None,
                 false,
+                None,
             )
             .await
             .expect("create extension service");

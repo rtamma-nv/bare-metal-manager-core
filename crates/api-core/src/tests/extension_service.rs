@@ -118,6 +118,7 @@ async fn create_test_extension_service(
         data: TEST_SERVICE_DATA.to_string(),
         credential,
         observability: None,
+        ..Default::default()
     };
 
     let create_resp = api
@@ -140,6 +141,7 @@ async fn create_test_extension_service_with_three_versions(
         data: TEST_SERVICE_DATA.to_string(),
         credential: None,
         observability: None,
+        ..Default::default()
     };
 
     let create_resp = env
@@ -196,6 +198,7 @@ async fn create_test_extension_service_with_ten_versions(
         data: TEST_SERVICE_DATA.to_string(),
         credential: None,
         observability: None,
+        ..Default::default()
     };
 
     let create_resp = env
@@ -284,6 +287,7 @@ async fn test_extension_service_creation(db_pool: sqlx::PgPool) -> Result<(), ey
         data: TEST_SERVICE_DATA.to_string(),
         credential: Some(create_credential()),
         observability: Some(create_observability()),
+        ..Default::default()
     };
 
     let create_resp: Result<tonic::Response<rpc::DpuExtensionService>, tonic::Status> = env
@@ -318,6 +322,7 @@ async fn test_extension_service_create_with_credential(
         data: TEST_SERVICE_DATA.to_string(),
         credential: Some(create_credential()),
         observability: Some(create_observability()),
+        ..Default::default()
     };
 
     let create_resp = env
@@ -364,6 +369,7 @@ async fn test_extension_service_create_failure(db_pool: sqlx::PgPool) -> Result<
         data: TEST_SERVICE_DATA.to_string(),
         credential: Some(create_credential()),
         observability: Some(create_observability()),
+        ..Default::default()
     };
 
     let create_resp = env
@@ -736,6 +742,7 @@ async fn test_extension_service_creation_invalid_arg(
         data: TEST_SERVICE_DATA.to_string(),
         credential: None,
         observability: None,
+        ..Default::default()
     };
 
     let create_resp = env
@@ -754,6 +761,7 @@ async fn test_extension_service_creation_invalid_arg(
         data: "".to_string(),
         credential: None,
         observability: None,
+        ..Default::default()
     };
 
     let create_resp = env
@@ -772,6 +780,7 @@ async fn test_extension_service_creation_invalid_arg(
         data: "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test".to_string(),
         credential: None,
         observability: None,
+        ..Default::default()
     };
 
     let create_resp = env
@@ -800,6 +809,7 @@ async fn test_extension_service_creation_invalid_arg(
                 ),
             ),
         }),
+        ..Default::default()
     };
 
     let create_resp = env
@@ -823,6 +833,7 @@ async fn test_extension_service_creation_invalid_arg(
                 config: None,
             }],
         }),
+        ..Default::default()
     };
 
     let create_resp = env
@@ -852,6 +863,7 @@ async fn test_extension_service_creation_invalid_arg(
                 ),
             }],
         }),
+        ..Default::default()
     };
 
     let create_resp = env
@@ -882,6 +894,7 @@ async fn test_extension_service_creation_invalid_arg(
                 100
             ],
         }),
+        ..Default::default()
     };
 
     let create_resp = env
@@ -908,6 +921,7 @@ async fn test_extension_service_creation_invalid_arg(
                 config: None,
             }],
         }),
+        ..Default::default()
     };
 
     let create_resp = env
@@ -938,6 +952,7 @@ async fn test_extension_service_creation_with_same_name(
         observability: None,
 
         tenant_organization_id: "best_org".to_string(),
+        ..Default::default()
     };
 
     let create_resp = env
@@ -963,6 +978,7 @@ async fn test_extension_service_creation_with_same_name(
         observability: None,
 
         tenant_organization_id: "best_org".to_string(),
+        ..Default::default()
     };
 
     let create_resp = env
@@ -985,6 +1001,7 @@ async fn test_extension_service_creation_with_same_name(
         observability: None,
 
         tenant_organization_id: "another_org".to_string(),
+        ..Default::default()
     };
 
     let create_resp = env
@@ -1166,6 +1183,7 @@ async fn test_extension_service_update_invalid_arg(
         data: TEST_SERVICE_DATA.to_string(),
         credential: None,
         observability: None,
+        ..Default::default()
     };
     let create_resp = env
         .api
@@ -1366,6 +1384,7 @@ async fn test_extension_service_update_metadata(db_pool: sqlx::PgPool) -> Result
         data: TEST_SERVICE_DATA.to_string(),
         credential: None,
         observability: None,
+        ..Default::default()
     };
     let create_resp = env
         .api
@@ -1720,6 +1739,7 @@ async fn test_extension_service_delete_in_use(db_pool: sqlx::PgPool) -> Result<(
             service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
                 service_id: service_id.clone(),
                 version: version3.clone(),
+                ..Default::default()
             }],
         })
         .build_and_return()
@@ -2254,6 +2274,7 @@ async fn test_find_instances_by_extension_service(
             service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
                 service_id: service_id.clone(),
                 version: version1.clone(),
+                ..Default::default()
             }],
         })
         .build_and_return()
@@ -2267,6 +2288,7 @@ async fn test_find_instances_by_extension_service(
             service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
                 service_id: service_id.clone(),
                 version: version2.clone(),
+                ..Default::default()
             }],
         })
         .build_and_return()
@@ -2401,6 +2423,7 @@ async fn test_find_instances_by_extension_service_multiple_services_per_instance
             data: TEST_SERVICE_DATA_VERSION_2.to_string(),
             credential: None,
             observability: None,
+            ..Default::default()
         }))
         .await?
         .into_inner();
@@ -2421,10 +2444,12 @@ async fn test_find_instances_by_extension_service_multiple_services_per_instance
                 rpc::InstanceDpuExtensionServiceConfig {
                     service_id: service1_id.clone(),
                     version: service1_version.clone(),
+                    ..Default::default()
                 },
                 rpc::InstanceDpuExtensionServiceConfig {
                     service_id: service2_id.clone(),
                     version: service2_version.clone(),
+                    ..Default::default()
                 },
             ],
         })
@@ -2464,6 +2489,294 @@ async fn test_find_instances_by_extension_service_multiple_services_per_instance
     assert_eq!(instances[0].instance_id, instance.id.to_string());
     assert_eq!(instances[0].service_id, service2_id);
     assert_eq!(instances[0].version, service2_version);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Service VPC binding tests (DPU block-storage design)
+// ---------------------------------------------------------------------------
+
+/// Creates a VPC owned by `tenant_org` to serve as a service VPC.
+async fn create_service_vpc(
+    env: &TestEnv,
+    tenant_org: &str,
+    name: &str,
+) -> carbide_uuid::vpc::VpcId {
+    env.api
+        .create_vpc(Request::new(
+            crate::tests::common::rpc_builder::VpcCreationRequest::builder(tenant_org)
+                .metadata(rpc::Metadata {
+                    name: name.to_string(),
+                    ..Default::default()
+                })
+                .rpc(),
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .expect("created VPC must have an id")
+}
+
+/// Creates an extension service owned by `best_org`, bound to `service_vpc_id`.
+async fn create_test_extension_service_with_vpc(
+    api: &Api,
+    name: &str,
+    service_vpc_id: carbide_uuid::vpc::VpcId,
+) -> Result<rpc::DpuExtensionService, tonic::Status> {
+    api.create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+        service_id: None,
+        service_name: name.to_string(),
+        description: Some("Service with service VPC".to_string()),
+        tenant_organization_id: "best_org".to_string(),
+        service_type: rpc::DpuExtensionServiceType::KubernetesPod.into(),
+        data: TEST_SERVICE_DATA.to_string(),
+        credential: None,
+        observability: None,
+        service_vpc_id: Some(service_vpc_id),
+    }))
+    .await
+    .map(|r| r.into_inner())
+}
+
+#[crate::sqlx_test]
+async fn test_extension_service_create_with_service_vpc(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    let vpc_id = create_service_vpc(&env, "best_org", "storage service vpc").await;
+    let service = create_test_extension_service_with_vpc(&env.api, "svc-vpc-service", vpc_id)
+        .await
+        .expect("create with service VPC should succeed");
+
+    // The response echoes the binding.
+    assert_eq!(service.service_vpc_id, Some(vpc_id));
+
+    // The binding is also visible through find_by_ids (snapshot path).
+    let found = env
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![service.service_id.clone()],
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(found.services.len(), 1);
+    assert_eq!(found.services[0].service_vpc_id, Some(vpc_id));
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_extension_service_create_with_missing_service_vpc(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    let bogus_vpc = carbide_uuid::vpc::VpcId::from(Uuid::new_v4());
+    let err = create_test_extension_service_with_vpc(&env.api, "svc-no-vpc", bogus_vpc)
+        .await
+        .expect_err("create with nonexistent service VPC must fail");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_extension_service_create_with_foreign_service_vpc(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    // VPC owned by another_org; service owned by best_org.
+    let vpc_id = create_service_vpc(&env, "another_org", "foreign vpc").await;
+    let err = create_test_extension_service_with_vpc(&env.api, "svc-foreign-vpc", vpc_id)
+        .await
+        .expect_err("service and service VPC must share the owning tenant");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_vpc_delete_blocked_by_service_vpc_reference(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    let vpc_id = create_service_vpc(&env, "best_org", "referenced vpc").await;
+    let service = create_test_extension_service_with_vpc(&env.api, "svc-blocks-vpc", vpc_id)
+        .await
+        .expect("create should succeed");
+
+    // Deleting the VPC while referenced must fail.
+    let err = env
+        .api
+        .delete_vpc(Request::new(rpc::VpcDeletionRequest { id: Some(vpc_id) }))
+        .await
+        .expect_err("VPC referenced as service VPC must not be deletable");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+    // Delete the service (all versions), releasing the reference.
+    env.api
+        .delete_dpu_extension_service(Request::new(rpc::DeleteDpuExtensionServiceRequest {
+            service_id: service.service_id.clone(),
+            versions: vec![],
+        }))
+        .await?;
+
+    // Now the VPC can be deleted.
+    env.api
+        .delete_vpc(Request::new(rpc::VpcDeletionRequest { id: Some(vpc_id) }))
+        .await
+        .expect("VPC deletion should succeed after the service is gone");
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_service_vpc_index_assignment_and_reuse(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    use crate::tests::common::api_fixtures::instance::{
+        default_os_config, default_tenant_config, single_interface_network_config,
+    };
+
+    let env = create_test_env(db_pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh1 = create_managed_host(&env).await;
+    let mh2 = create_managed_host(&env).await;
+    let mh3 = create_managed_host(&env).await;
+
+    create_test_tenants(&env).await?;
+    let vpc_a = create_service_vpc(&env, "best_org", "service vpc a").await;
+    let vpc_b = create_service_vpc(&env, "best_org", "service vpc b").await;
+    let service_a = create_test_extension_service_with_vpc(&env.api, "svc-a", vpc_a)
+        .await
+        .expect("create svc-a");
+    let service_b = create_test_extension_service_with_vpc(&env.api, "svc-b", vpc_b)
+        .await
+        .expect("create svc-b");
+    let version_a = service_a
+        .latest_version_info
+        .as_ref()
+        .unwrap()
+        .version
+        .clone();
+    let version_b = service_b
+        .latest_version_info
+        .as_ref()
+        .unwrap()
+        .version
+        .clone();
+
+    // Instance 1 attaches service A: first (tenant, vpc_a) binding -> index 0.
+    let (_i1, _) = mh1
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .extension_services(rpc::InstanceDpuExtensionServicesConfig {
+            service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
+                service_id: service_a.service_id.clone(),
+                version: version_a.clone(),
+                ..Default::default()
+            }],
+        })
+        .build_and_return()
+        .await;
+
+    let mut txn = env.db_txn().await;
+    let snapshot1 = mh1.snapshot(&mut txn).await;
+    let configs1 = snapshot1
+        .instance
+        .unwrap()
+        .config
+        .extension_services
+        .service_configs;
+    assert_eq!(configs1.len(), 1);
+    assert_eq!(configs1[0].service_vpc_id, Some(vpc_a));
+    assert_eq!(configs1[0].service_vpc_index, Some(0));
+    drop(txn);
+
+    // Instance 2 attaches services A and B: A reuses index 0 (same tenant and
+    // VPC as instance 1), B gets the next index, 1.
+    let (_i2, _) = mh2
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .extension_services(rpc::InstanceDpuExtensionServicesConfig {
+            service_configs: vec![
+                rpc::InstanceDpuExtensionServiceConfig {
+                    service_id: service_a.service_id.clone(),
+                    version: version_a.clone(),
+                    ..Default::default()
+                },
+                rpc::InstanceDpuExtensionServiceConfig {
+                    service_id: service_b.service_id.clone(),
+                    version: version_b.clone(),
+                    ..Default::default()
+                },
+            ],
+        })
+        .build_and_return()
+        .await;
+
+    let mut txn = env.db_txn().await;
+    let snapshot2 = mh2.snapshot(&mut txn).await;
+    let configs2 = snapshot2
+        .instance
+        .unwrap()
+        .config
+        .extension_services
+        .service_configs;
+    assert_eq!(configs2.len(), 2);
+    let by_service: std::collections::HashMap<_, _> = configs2
+        .iter()
+        .map(|c| (c.service_id.to_string(), c))
+        .collect();
+    let a = by_service[&service_a.service_id];
+    let b = by_service[&service_b.service_id];
+    assert_eq!(a.service_vpc_id, Some(vpc_a));
+    assert_eq!(a.service_vpc_index, Some(0));
+    assert_eq!(b.service_vpc_id, Some(vpc_b));
+    assert_eq!(b.service_vpc_index, Some(1));
+    drop(txn);
+
+    // A caller-supplied index that does not echo the system-assigned value is
+    // rejected.
+    let err = env
+        .api
+        .allocate_instance(Request::new(rpc::InstanceAllocationRequest {
+            instance_id: None,
+            machine_id: Some(mh3.host().id),
+            instance_type_id: None,
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(default_os_config()),
+                network: Some(single_interface_network_config(segment_id)),
+                infiniband: None,
+                network_security_group_id: None,
+                nvlink: None,
+                spxconfig: None,
+                power_profile: None,
+                dpu_extension_services: Some(rpc::InstanceDpuExtensionServicesConfig {
+                    service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
+                        service_id: service_a.service_id.clone(),
+                        version: version_a.clone(),
+                        service_vpc_id: None,
+                        service_vpc_index: Some(7),
+                    }],
+                }),
+            }),
+            metadata: None,
+            allow_unhealthy_machine: false,
+        }))
+        .await
+        .expect_err("caller-supplied service_vpc_index must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
     Ok(())
 }

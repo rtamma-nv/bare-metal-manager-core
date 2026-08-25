@@ -352,6 +352,21 @@ pub(crate) async fn delete(
         .into());
     }
 
+    // A VPC referenced as a service VPC by a live extension service cannot be
+    // deleted (extension-service creation takes the same VPC row lock, so this
+    // check cannot race a concurrent reference being created).
+    let referencing_services =
+        db::extension_service::find_ids_by_service_vpc(txn.as_mut(), &vpc_id).await?;
+    if !referencing_services.is_empty() {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "VPC {vpc_id} is the service VPC of {} extension service(s) (e.g. {}); \
+             delete those services first",
+            referencing_services.len(),
+            referencing_services[0],
+        ))
+        .into());
+    }
+
     let vpc = match db::vpc::try_delete(&mut txn, vpc_id).await? {
         Some(vpc) => vpc,
         None => {

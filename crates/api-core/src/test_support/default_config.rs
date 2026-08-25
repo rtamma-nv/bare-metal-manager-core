@@ -49,7 +49,8 @@ use crate::cfg::file::{
     VpcPrefixStateControllerConfig, default_bmc_session_lockout_threshold,
     default_database_pool_acquire_timeout, default_database_pool_idle_timeout,
     default_database_pool_max_lifetime, default_max_find_by_ids,
-    default_max_site_prefixes_per_tenant, default_pxe_public_base_url,
+    default_max_service_vpcs_per_tenant, default_max_site_prefixes_per_tenant,
+    default_pxe_public_base_url,
 };
 #[cfg(test)]
 use crate::cfg::file::{
@@ -283,6 +284,7 @@ pub fn get() -> CarbideConfig {
             max_concurrent_machine_updates_percent: None,
         },
         max_find_by_ids: default_max_find_by_ids(),
+        max_service_vpcs_per_tenant: default_max_service_vpcs_per_tenant(),
         network_security_group: NetworkSecurityGroupConfig::default(),
         min_dpu_functioning_links: None,
         dpu_network_monitor_pinger_type: None,

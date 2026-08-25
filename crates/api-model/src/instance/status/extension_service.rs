@@ -452,6 +452,8 @@ mod tests {
                 service_id: get_test_service_id(),
                 version,
                 removed: None,
+                service_vpc_id: None,
+                service_vpc_index: None,
             }],
         }
     }
@@ -685,11 +687,15 @@ mod tests {
                                 service_id: get_test_service_id(),
                                 version: second_service_version,
                                 removed: None,
+                                service_vpc_id: None,
+                                service_vpc_index: None,
                             },
                             InstanceExtensionServiceConfig {
                                 service_id: get_test_service_id(),
                                 version: service_version,
                                 removed: Some(removed_at),
+                                service_vpc_id: None,
+                                service_vpc_index: None,
                             },
                         ],
                     },
@@ -1197,11 +1203,15 @@ mod tests {
                     service_id: get_test_service_id(),
                     version: second_version,
                     removed: None,
+                    service_vpc_id: None,
+                    service_vpc_index: None,
                 },
                 InstanceExtensionServiceConfig {
                     service_id: get_test_service_id(),
                     version: init_version,
                     removed: Some(Utc::now()),
+                    service_vpc_id: None,
+                    service_vpc_index: None,
                 },
             ],
         };

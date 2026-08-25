@@ -2021,6 +2021,7 @@ async fn test_reject_zero_dpu_instance_with_extension_services(
                     service_configs: vec![forge::InstanceDpuExtensionServiceConfig {
                         service_id: "test-service".to_string(),
                         version: "1.0.0".to_string(),
+                        ..Default::default()
                     }],
                 }),
                 nvlink: None,

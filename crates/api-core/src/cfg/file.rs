@@ -487,6 +487,14 @@ pub struct CarbideConfig {
     #[serde(default = "default_max_find_by_ids")]
     pub max_find_by_ids: u32,
 
+    /// Maximum number of distinct service VPCs one consumer tenant can attach
+    /// to via DPU extension services. Bounds the per-tenant
+    /// `service_vpc_index` pool (indices 0..max). Constrained by the HBN port
+    /// limit: this value + the DPU's VF count must stay <= 32.
+    /// Default is 8.
+    #[serde(default = "default_max_service_vpcs_per_tenant")]
+    pub max_service_vpcs_per_tenant: u32,
+
     /// Network security group settings: max expanded rule
     /// count, stateful ACL enforcement, and policy overrides
     /// injected before user-defined rules.
@@ -3600,6 +3608,10 @@ pub struct MachineUpdater {
 
 pub fn default_max_find_by_ids() -> u32 {
     100
+}
+
+pub fn default_max_service_vpcs_per_tenant() -> u32 {
+    8
 }
 
 pub fn default_max_site_prefixes_per_tenant() -> u32 {

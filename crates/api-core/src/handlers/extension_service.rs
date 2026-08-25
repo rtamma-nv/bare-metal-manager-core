@@ -177,18 +177,29 @@ pub(crate) async fn create(
     // Finally, create the extension in the database. If this fails, the vault credential will be removed.
     let (service, version) = match api
         .with_txn(|txn| {
-            extension_service::create(
-                txn,
-                initial_version,
-                &service_id,
-                &service_type,
-                &req.service_name,
-                &tenant_organization_id,
-                req.description.as_deref(),
-                &req.data,
-                observability,
-                req.credential.is_some(),
-            )
+            async {
+                // A service VPC must exist and be owned by the same tenant as
+                // the service. Validated under a row lock in the same
+                // transaction so a concurrent VPC deletion cannot race the
+                // reference we are about to create.
+                if let Some(vpc_id) = req.service_vpc_id.as_ref() {
+                    validate_service_vpc(txn.as_mut(), vpc_id, &tenant_organization_id).await?;
+                }
+                extension_service::create(
+                    txn,
+                    initial_version,
+                    &service_id,
+                    &service_type,
+                    &req.service_name,
+                    &tenant_organization_id,
+                    req.description.as_deref(),
+                    &req.data,
+                    observability,
+                    req.credential.is_some(),
+                    req.service_vpc_id.as_ref(),
+                )
+                .await
+            }
             .boxed()
         })
         .await
@@ -238,9 +249,44 @@ pub(crate) async fn create(
         description: service.description,
         created: service.created.to_string(),
         updated: service.updated.to_string(),
+        service_vpc_id: service.service_vpc_id,
     };
 
     Ok(Response::new(response))
+}
+
+/// Validates that a service VPC referenced by an extension service exists, is
+/// not deleted, and is owned by the same tenant organization as the service.
+///
+/// Takes a `Mutation` row lock on the VPC so a concurrent `VpcDeletion` in
+/// another transaction serializes against the extension-service creation that
+/// follows in this transaction.
+async fn validate_service_vpc(
+    txn: &mut sqlx::PgConnection,
+    vpc_id: &carbide_uuid::vpc::VpcId,
+    tenant_organization_id: &TenantOrganizationId,
+) -> Result<(), db::DatabaseError> {
+    let vpcs = db::vpc::find_by_with_lock(
+        txn,
+        db::ObjectColumnFilter::One(db::vpc::IdColumn, vpc_id),
+        db::vpc::VpcRowLock::Mutation,
+    )
+    .await?;
+
+    let Some(vpc) = vpcs.first() else {
+        return Err(db::DatabaseError::NotFoundError {
+            kind: "vpc",
+            id: vpc_id.to_string(),
+        });
+    };
+
+    if vpc.config.tenant_organization_id != tenant_organization_id.to_string() {
+        return Err(db::DatabaseError::FailedPrecondition(format!(
+            "service VPC `{vpc_id}` is not owned by tenant organization `{tenant_organization_id}`"
+        )));
+    }
+
+    Ok(())
 }
 
 /// Updates an existing extension service
@@ -480,6 +526,7 @@ pub(crate) async fn update(
         description: updated_service.description.clone(),
         created: updated_service.created.to_string(),
         updated: updated_service.updated.to_string(),
+        service_vpc_id: updated_service.service_vpc_id,
     };
 
     Ok(Response::new(response))
@@ -566,6 +613,35 @@ pub(crate) async fn delete(
         let all_versions = extension_service::find_all_versions(&mut txn, service_id).await?;
         if all_versions.is_empty() {
             extension_service::soft_delete_service(&mut txn, service_id).await?;
+
+            // The registration is gone: release every tenant's
+            // service_vpc_index allocation for its service VPC, unless another
+            // live service still references the same VPC.
+            if let Some(service_vpc_id) = current_service_res[0].service_vpc_id {
+                // Lock the VPC row first — the same Mutation lock create's
+                // validate_service_vpc takes — so an in-flight create that is
+                // about to reference this VPC serializes with this check.
+                // Without it the create's uncommitted reference is invisible
+                // here, and the release below would pull the allocated index
+                // out from under the newly created service.
+                let _ = db::vpc::find_by_with_lock(
+                    txn.as_mut(),
+                    db::ObjectColumnFilter::One(db::vpc::IdColumn, &service_vpc_id),
+                    db::vpc::VpcRowLock::Mutation,
+                )
+                .await?;
+                let still_referenced =
+                    !extension_service::find_ids_by_service_vpc(&mut txn, &service_vpc_id)
+                        .await?
+                        .is_empty();
+                if !still_referenced {
+                    db::resource_pool::release_service_vpc_indices(
+                        &mut txn,
+                        &service_vpc_id.to_string(),
+                    )
+                    .await?;
+                }
+            }
         } else {
             // Update the service updated timestamp to account for deletion of versions
             extension_service::set_updated_timestamp(&mut txn, service_id).await?;

@@ -167,6 +167,9 @@ pub enum OwnerType {
 
     /// owner_type for East West Networks
     SpxPartition,
+
+    /// owner_type for service_vpc_index allocations; owner_id is the service VPC id
+    ServiceVpc,
 }
 
 impl FromStr for OwnerType {
@@ -178,6 +181,7 @@ impl FromStr for OwnerType {
             "ib_partition" => Ok(Self::IBPartition),
             "vpc" => Ok(Self::Vpc),
             "spx_partition" => Ok(Self::SpxPartition),
+            "service_vpc" => Ok(Self::ServiceVpc),
             x => Err(ModelError::InvalidArgument(format!(
                 "Unknown owner_type '{x}'"
             ))),
@@ -193,6 +197,7 @@ impl fmt::Display for OwnerType {
             Self::IBPartition => write!(f, "ib_partition"),
             Self::Vpc => write!(f, "vpc"),
             Self::SpxPartition => write!(f, "spx_partition"),
+            Self::ServiceVpc => write!(f, "service_vpc"),
         }
     }
 }

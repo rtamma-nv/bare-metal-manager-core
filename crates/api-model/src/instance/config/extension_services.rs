@@ -18,6 +18,7 @@
 use std::collections::HashSet;
 
 use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::vpc::VpcId;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,14 @@ pub struct InstanceExtensionServiceConfig {
     pub service_id: ExtensionServiceId,
     pub version: ConfigVersion,
     pub removed: Option<DateTime<Utc>>, // We need to track terminating services
+    /// Service VPC the service connects the DPU to. Derived from the
+    /// extension-service registration at config-update time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_vpc_id: Option<VpcId>,
+    /// Per-(consumer tenant, service VPC) index for DPU-side shadow-VRF/SF
+    /// selection. System-assigned via the resource pool; never client-supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_vpc_index: Option<u32>,
 }
 
 /// Extension services configuration for an instance
@@ -133,11 +142,11 @@ impl InstanceExtensionServicesConfig {
                     // The service is already being terminated, so we just need to add it back to the new config
                     result.push(service.clone());
                 } else {
-                    // The service is not being terminated, so we need to mark it as terminated
+                    // The service is not being terminated, so we need to mark it as terminated.
+                    // service_vpc fields are preserved: the index stays reserved until cleanup.
                     result.push(InstanceExtensionServiceConfig {
-                        service_id: service.service_id,
-                        version: service.version,
                         removed: Some(now),
+                        ..service.clone()
                     });
                 }
             }
@@ -201,11 +210,15 @@ mod tests {
                     service_id: sid,
                     version: second_version,
                     removed: None,
+                    service_vpc_id: None,
+                    service_vpc_index: None,
                 },
                 InstanceExtensionServiceConfig {
                     service_id: sid,
                     version: init_version,
                     removed: Some(Utc::now()),
+                    service_vpc_id: None,
+                    service_vpc_index: None,
                 },
             ],
         };
@@ -229,6 +242,8 @@ mod tests {
                 service_id: existing_id,
                 version: initial_version,
                 removed: None,
+                service_vpc_id: None,
+                service_vpc_index: None,
             }],
         };
 
@@ -245,6 +260,8 @@ mod tests {
                     service_id: new_id,
                     version: initial_version,
                     removed: None,
+                    service_vpc_id: None,
+                    service_vpc_index: None,
                 },
             ],
         };
@@ -255,6 +272,8 @@ mod tests {
                 service_id: existing_id,
                 version: initial_version.increment(),
                 removed: None,
+                service_vpc_id: None,
+                service_vpc_index: None,
             }],
         };
         assert!(current.has_new_active_services(&upgraded));

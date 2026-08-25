@@ -126,6 +126,8 @@ impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
             observability: Some(::rpc::forge::DpuExtensionServiceObservability {
                 configs: observability,
             }),
+            // Service-VPC binding is not exposed through the CLI yet.
+            service_vpc_id: None,
         })
     }
 }

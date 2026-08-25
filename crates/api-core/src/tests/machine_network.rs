@@ -1593,6 +1593,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
             data: create_extension_service_data("test"),
             credential: None,
             observability: None,
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -1615,6 +1616,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
             data: create_extension_service_data("test2"),
             credential: None,
             observability: None,
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -1631,10 +1633,12 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
             InstanceDpuExtensionServiceConfig {
                 service_id: extension_service1.service_id.clone(),
                 version: service1_version.clone(),
+                ..Default::default()
             },
             InstanceDpuExtensionServiceConfig {
                 service_id: extension_service2.service_id.clone(),
                 version: service2_version.clone(),
+                ..Default::default()
             },
         ],
     };

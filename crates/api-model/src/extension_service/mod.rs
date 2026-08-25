@@ -16,6 +16,7 @@
  */
 
 use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::vpc::VpcId;
 use chrono::prelude::*;
 use config_version::ConfigVersion;
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,9 @@ pub struct ExtensionService {
     pub tenant_organization_id: TenantOrganizationId,
     pub description: String,
     pub version_ctr: i32, // Version counter for the extension service, always incremented
+    /// Service VPC this extension service is bound to. Immutable once set;
+    /// must be owned by `tenant_organization_id`.
+    pub service_vpc_id: Option<VpcId>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
@@ -86,6 +90,7 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionService {
                 .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
             description: row.try_get("description")?,
             version_ctr: row.try_get::<i32, _>("version_ctr")?,
+            service_vpc_id: row.try_get("service_vpc_id")?,
             created: row.try_get("created")?,
             updated: row.try_get("updated")?,
             deleted: row.try_get("deleted")?,
@@ -132,6 +137,7 @@ pub struct ExtensionServiceSnapshot {
     pub latest_version: Option<ExtensionServiceVersionInfo>,
     pub active_versions: Vec<ConfigVersion>,
     pub description: String,
+    pub service_vpc_id: Option<VpcId>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
@@ -201,6 +207,7 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
             latest_version: latest_service_version,
             active_versions,
             description,
+            service_vpc_id: row.try_get("service_vpc_id")?,
             created,
             updated,
             deleted,

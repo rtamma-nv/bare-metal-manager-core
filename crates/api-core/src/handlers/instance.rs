@@ -1407,6 +1407,7 @@ pub(crate) async fn update_instance_config(
         &mh_snapshot,
         &instance,
         &mut config.extension_services,
+        api.runtime_config.max_service_vpcs_per_tenant,
         &mut txn,
     )
     .await?;
@@ -1782,6 +1783,7 @@ async fn update_instance_extension_services_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     extension_services: &mut InstanceExtensionServicesConfig,
+    max_service_vpcs_per_tenant: u32,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), CarbideError> {
     if !instance
@@ -1816,6 +1818,16 @@ async fn update_instance_extension_services_config(
             mh_snapshot.host_snapshot.id
         )));
     }
+
+    // Derive service-VPC bindings and assign each bound service its stable
+    // per-(tenant, service VPC) index.
+    crate::instance::assign_service_vpc_bindings(
+        extension_services,
+        instance.config.tenant.tenant_organization_id.as_str(),
+        max_service_vpcs_per_tenant,
+        txn.as_mut(),
+    )
+    .await?;
 
     // Calculate the new extension services config.
     let new_extension_services_config = instance

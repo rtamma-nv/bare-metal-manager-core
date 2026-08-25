@@ -46,6 +46,8 @@ impl TryFrom<rpc::InstanceDpuExtensionServiceConfig> for InstanceExtensionServic
             service_id,
             version,
             removed: None,
+            service_vpc_id: config.service_vpc_id,
+            service_vpc_index: config.service_vpc_index,
         })
     }
 }
@@ -55,6 +57,8 @@ impl From<InstanceExtensionServiceConfig> for rpc::InstanceDpuExtensionServiceCo
         rpc::InstanceDpuExtensionServiceConfig {
             service_id: config.service_id.into(),
             version: config.version.to_string(),
+            service_vpc_id: config.service_vpc_id,
+            service_vpc_index: config.service_vpc_index,
         }
     }
 }
