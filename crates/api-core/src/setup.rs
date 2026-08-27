@@ -287,8 +287,18 @@ pub(crate) async fn start_runtime(
         )
         .await?;
 
-        db::site_prefix::reconcile_configured(&mut txn, &carbide_config.site_fabric_prefixes)
-            .await?;
+        // The service-VPC ULA root (fd00::/8, block-storage design §6.2) is
+        // seeded alongside the operator-configured site prefixes so it exists
+        // as an operator-managed, datacenter-only SitePrefix — the parent
+        // every derived service-VPC /48 attaches under. It is deliberately
+        // NOT added to eth_data's site_fabric_prefixes: tenant-facing segment
+        // carving inside the ULA space must stay rejected.
+        let service_vpc_ula_root = crate::extension_service_ula::service_vpc_ula_root();
+        let mut configured_site_prefixes = carbide_config.site_fabric_prefixes.clone();
+        if !configured_site_prefixes.contains(&service_vpc_ula_root) {
+            configured_site_prefixes.push(service_vpc_ula_root);
+        }
+        db::site_prefix::reconcile_configured(&mut txn, &configured_site_prefixes).await?;
 
         if !carbide_config.site_fabric_prefixes.is_empty() {
             let lineage =

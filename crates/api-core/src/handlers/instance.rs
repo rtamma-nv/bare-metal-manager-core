@@ -1819,11 +1819,44 @@ async fn update_instance_extension_services_config(
         )));
     }
 
+    // Carry forward system-assigned bindings for services that are already
+    // active, so complete-replace updates that omit them do not re-derive
+    // endpoints under a fresh attachment id (leaking the old reservations).
+    for service in extension_services
+        .service_configs
+        .iter_mut()
+        .filter(|s| s.removed.is_none() && s.attachment_id.is_none())
+    {
+        if let Some(current) = instance
+            .config
+            .extension_services
+            .service_configs
+            .iter()
+            .find(|c| {
+                c.removed.is_none()
+                    && c.service_id == service.service_id
+                    && c.version == service.version
+            })
+        {
+            service.service_vpc_id = current.service_vpc_id;
+            service.service_vpc_index = current.service_vpc_index;
+            service.attachment_id = current.attachment_id;
+            service.endpoints = current.endpoints.clone();
+        }
+    }
+
     // Derive service-VPC bindings and assign each bound service its stable
-    // per-(tenant, service VPC) index.
+    // per-(tenant, service VPC) index and endpoint /127s. An empty DPU list
+    // is rejected inside assign_service_vpc_bindings, and only when a new
+    // binding actually needs it — plain (non-VPC) service changes must not
+    // fail on a transient snapshot-load gap.
+    let dpu_ids: Vec<carbide_uuid::machine::MachineId> =
+        mh_snapshot.dpu_snapshots.iter().map(|d| d.id).collect();
     crate::instance::assign_service_vpc_bindings(
         extension_services,
         instance.config.tenant.tenant_organization_id.as_str(),
+        instance.id,
+        &dpu_ids,
         max_service_vpcs_per_tenant,
         txn.as_mut(),
     )
@@ -1834,6 +1867,29 @@ async fn update_instance_extension_services_config(
         .config
         .extension_services
         .calculate_new_extension_services_config(extension_services);
+
+    // Newly terminated bindings release their endpoint /127 reservations.
+    // TODO(blockstorage): defer this to DPF cleanup acknowledgement once DPU
+    // config delivery exists (increment 3).
+    for service in new_extension_services_config
+        .service_configs
+        .iter()
+        .filter(|s| s.removed.is_some())
+    {
+        let was_active = instance
+            .config
+            .extension_services
+            .service_configs
+            .iter()
+            .any(|c| {
+                c.removed.is_none()
+                    && c.service_id == service.service_id
+                    && c.version == service.version
+            });
+        if was_active && let Some(attachment_id) = service.attachment_id {
+            db::service_vpc_endpoint::delete_by_attachment(txn.as_mut(), attachment_id).await?;
+        }
+    }
 
     // Persist the extension services config.
     db::instance::update_extension_services_config(
@@ -1884,6 +1940,9 @@ pub(super) async fn force_delete_instance(
     // TODO: This might need some changes with the new state machine
     let mut txn = api.txn_begin().await?;
     db::instance::delete(instance_id, &mut txn).await?;
+    // The instance's service-VPC endpoint /127 reservations die with it.
+    // TODO(blockstorage): defer to DPF cleanup acknowledgement (increment 3).
+    db::service_vpc_endpoint::delete_by_instance(txn.as_mut(), instance_id).await?;
 
     let mut network_segment_ids_with_vpc = vec![];
     if let Some(update_network_req) = &instance.update_network_config_request {

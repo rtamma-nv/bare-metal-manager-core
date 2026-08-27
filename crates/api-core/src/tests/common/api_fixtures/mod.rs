@@ -1365,6 +1365,15 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
     db::resource_pool::define_all_from(&mut txn, &pool_defs(pool_size))
         .await
         .unwrap();
+    // Seed the service-VPC ULA root SitePrefix, mirroring startup
+    // reconciliation (setup.rs) so extension-service registrations with a
+    // service VPC can derive their /48.
+    db::site_prefix::reconcile_configured(
+        &mut txn,
+        &[crate::extension_service_ula::service_vpc_ula_root()],
+    )
+    .await
+    .expect("seeding the service-VPC ULA root should work");
     txn.commit().await.unwrap();
 
     let common_pools =

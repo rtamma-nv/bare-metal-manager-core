@@ -39,7 +39,7 @@ fn contains_prefix(parent: IpNetwork, child: IpNetwork) -> bool {
     }
 }
 
-fn validate_site_prefix_attachment(
+pub(crate) fn validate_site_prefix_attachment(
     site_prefix: &SitePrefix,
     vpc: &Vpc,
     vpc_prefix: IpNetwork,

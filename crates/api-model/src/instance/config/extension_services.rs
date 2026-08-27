@@ -17,13 +17,23 @@
 
 use std::collections::HashSet;
 
-use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::extension_service::{AttachmentId, ExtensionServiceId};
+use carbide_uuid::machine::MachineId;
 use carbide_uuid::vpc::VpcId;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
+use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 
 use crate::ConfigValidationError;
+
+/// One service-VPC endpoint of a binding: the /127 link prefix reserved for
+/// one DPU. `::0` is the HBN side, `::1` the client side.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstanceExtensionServiceVpcEndpointConfig {
+    pub dpu_id: MachineId,
+    pub link_prefix: IpNetwork,
+}
 
 /// Extension service configuration for a single service
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +49,14 @@ pub struct InstanceExtensionServiceConfig {
     /// selection. System-assigned via the resource pool; never client-supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_vpc_index: Option<u32>,
+    /// Identity of this binding, used to derive endpoint /127s. Minted (and
+    /// on derivation collision re-minted) by the system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<AttachmentId>,
+    /// Per-DPU /127 link prefixes reserved for this binding inside the
+    /// service VPC's derived ULA /48. System-assigned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<InstanceExtensionServiceVpcEndpointConfig>,
 }
 
 /// Extension services configuration for an instance
@@ -212,6 +230,8 @@ mod tests {
                     removed: None,
                     service_vpc_id: None,
                     service_vpc_index: None,
+                    attachment_id: None,
+                    endpoints: Vec::new(),
                 },
                 InstanceExtensionServiceConfig {
                     service_id: sid,
@@ -219,6 +239,8 @@ mod tests {
                     removed: Some(Utc::now()),
                     service_vpc_id: None,
                     service_vpc_index: None,
+                    attachment_id: None,
+                    endpoints: Vec::new(),
                 },
             ],
         };
@@ -244,6 +266,8 @@ mod tests {
                 removed: None,
                 service_vpc_id: None,
                 service_vpc_index: None,
+                attachment_id: None,
+                endpoints: Vec::new(),
             }],
         };
 
@@ -262,6 +286,8 @@ mod tests {
                     removed: None,
                     service_vpc_id: None,
                     service_vpc_index: None,
+                    attachment_id: None,
+                    endpoints: Vec::new(),
                 },
             ],
         };
@@ -274,6 +300,8 @@ mod tests {
                 removed: None,
                 service_vpc_id: None,
                 service_vpc_index: None,
+                attachment_id: None,
+                endpoints: Vec::new(),
             }],
         };
         assert!(current.has_new_active_services(&upgraded));

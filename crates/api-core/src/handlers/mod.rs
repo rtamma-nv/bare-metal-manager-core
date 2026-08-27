@@ -95,7 +95,9 @@ pub(super) mod uefi_credential_rotation;
 mod utils;
 pub(super) mod vpc;
 pub(super) mod vpc_peering;
-pub(super) mod vpc_prefix;
+// pub(crate): extension_service_ula reuses this module's site-prefix
+// attachment validation for derived service-VPC /48s.
+pub(crate) mod vpc_prefix;
 
 #[cfg(test)]
 pub(crate) async fn resolve_machine_interface_for_test(

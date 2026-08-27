@@ -15,10 +15,11 @@
  * limitations under the License.
  */
 
-use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::extension_service::{AttachmentId, ExtensionServiceId};
 use config_version::ConfigVersion;
 use model::instance::config::extension_services::{
-    InstanceExtensionServiceConfig, InstanceExtensionServicesConfig,
+    InstanceExtensionServiceConfig, InstanceExtensionServiceVpcEndpointConfig,
+    InstanceExtensionServicesConfig,
 };
 
 use crate::errors::RpcDataConversionError;
@@ -42,12 +43,38 @@ impl TryFrom<rpc::InstanceDpuExtensionServiceConfig> for InstanceExtensionServic
             ))
         })?;
 
+        let attachment_id = config
+            .attachment_id
+            .map(|s| s.parse::<AttachmentId>())
+            .transpose()
+            .map_err(|e| RpcDataConversionError::InvalidUuid("AttachmentId", e.to_string()))?;
+
+        let endpoints = config
+            .service_vpc_endpoints
+            .into_iter()
+            .map(|e| {
+                let dpu_id = e
+                    .dpu_id
+                    .ok_or(RpcDataConversionError::MissingArgument("dpu_id"))?;
+                let link_prefix = e
+                    .link_prefix
+                    .parse()
+                    .map_err(|_| RpcDataConversionError::InvalidIpAddress(e.link_prefix.clone()))?;
+                Ok(InstanceExtensionServiceVpcEndpointConfig {
+                    dpu_id,
+                    link_prefix,
+                })
+            })
+            .collect::<Result<Vec<_>, RpcDataConversionError>>()?;
+
         Ok(InstanceExtensionServiceConfig {
             service_id,
             version,
             removed: None,
             service_vpc_id: config.service_vpc_id,
             service_vpc_index: config.service_vpc_index,
+            attachment_id,
+            endpoints,
         })
     }
 }
@@ -59,6 +86,15 @@ impl From<InstanceExtensionServiceConfig> for rpc::InstanceDpuExtensionServiceCo
             version: config.version.to_string(),
             service_vpc_id: config.service_vpc_id,
             service_vpc_index: config.service_vpc_index,
+            attachment_id: config.attachment_id.map(|a| a.to_string()),
+            service_vpc_endpoints: config
+                .endpoints
+                .into_iter()
+                .map(|e| rpc::InstanceDpuExtensionServiceVpcEndpointConfig {
+                    dpu_id: Some(e.dpu_id),
+                    link_prefix: e.link_prefix.to_string(),
+                })
+                .collect(),
         }
     }
 }

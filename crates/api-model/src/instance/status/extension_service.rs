@@ -454,6 +454,8 @@ mod tests {
                 removed: None,
                 service_vpc_id: None,
                 service_vpc_index: None,
+                attachment_id: None,
+                endpoints: Vec::new(),
             }],
         }
     }
@@ -689,6 +691,8 @@ mod tests {
                                 removed: None,
                                 service_vpc_id: None,
                                 service_vpc_index: None,
+                    attachment_id: None,
+                    endpoints: Vec::new(),
                             },
                             InstanceExtensionServiceConfig {
                                 service_id: get_test_service_id(),
@@ -696,6 +700,8 @@ mod tests {
                                 removed: Some(removed_at),
                                 service_vpc_id: None,
                                 service_vpc_index: None,
+                    attachment_id: None,
+                    endpoints: Vec::new(),
                             },
                         ],
                     },
@@ -1205,6 +1211,8 @@ mod tests {
                     removed: None,
                     service_vpc_id: None,
                     service_vpc_index: None,
+                    attachment_id: None,
+                    endpoints: Vec::new(),
                 },
                 InstanceExtensionServiceConfig {
                     service_id: get_test_service_id(),
@@ -1212,6 +1220,8 @@ mod tests {
                     removed: Some(Utc::now()),
                     service_vpc_id: None,
                     service_vpc_index: None,
+                    attachment_id: None,
+                    endpoints: Vec::new(),
                 },
             ],
         };

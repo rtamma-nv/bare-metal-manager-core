@@ -3237,6 +3237,14 @@ message InstanceInfinibandConfig {
   repeated InstanceIBInterfaceConfig ib_interfaces = 1;
 }
 
+// One service-VPC endpoint of a binding: the /127 link prefix reserved for
+// one DPU (::0 = HBN side, ::1 = client side). System-assigned.
+message InstanceDpuExtensionServiceVpcEndpointConfig {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  common.MachineId dpu_id = 1;
+  string link_prefix = 2;
+}
+
 message InstanceDpuExtensionServiceConfig {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   string service_id = 1;
@@ -3247,6 +3255,12 @@ message InstanceDpuExtensionServiceConfig {
   // Per-(consumer tenant, service VPC) index used for DPU-side shadow-VRF/SF
   // selection. System-assigned; must not be set in requests.
   optional uint32 service_vpc_index = 4;
+  // Identity of this binding, from which endpoint /127s are derived.
+  // System-assigned; echoes of previous responses are accepted.
+  optional string attachment_id = 5;
+  // Per-DPU /127 link prefixes inside the service VPC's derived ULA /48.
+  // System-assigned.
+  repeated InstanceDpuExtensionServiceVpcEndpointConfig service_vpc_endpoints = 6;
 }
 
 // Extension services configuration for an instance

@@ -88,6 +88,7 @@ pub mod retained_boot_interface;
 pub mod retired_ib_membership;
 pub mod route_servers;
 pub mod secrets;
+pub mod service_vpc_endpoint;
 pub mod site_exploration_report;
 pub mod site_explorer_run_status;
 pub mod site_prefix;

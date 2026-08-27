@@ -181,9 +181,13 @@ pub(crate) async fn create(
                 // A service VPC must exist and be owned by the same tenant as
                 // the service. Validated under a row lock in the same
                 // transaction so a concurrent VPC deletion cannot race the
-                // reference we are about to create.
+                // reference we are about to create. The row lock also covers
+                // the derived-/48 ensure below.
                 if let Some(vpc_id) = req.service_vpc_id.as_ref() {
-                    validate_service_vpc(txn.as_mut(), vpc_id, &tenant_organization_id).await?;
+                    let vpc =
+                        validate_service_vpc(txn.as_mut(), vpc_id, &tenant_organization_id).await?;
+                    crate::extension_service_ula::ensure_service_vpc_ula_prefix(txn.as_mut(), &vpc)
+                        .await?;
                 }
                 extension_service::create(
                     txn,
@@ -265,7 +269,7 @@ async fn validate_service_vpc(
     txn: &mut sqlx::PgConnection,
     vpc_id: &carbide_uuid::vpc::VpcId,
     tenant_organization_id: &TenantOrganizationId,
-) -> Result<(), db::DatabaseError> {
+) -> Result<model::vpc::Vpc, db::DatabaseError> {
     let vpcs = db::vpc::find_by_with_lock(
         txn,
         db::ObjectColumnFilter::One(db::vpc::IdColumn, vpc_id),
@@ -273,7 +277,7 @@ async fn validate_service_vpc(
     )
     .await?;
 
-    let Some(vpc) = vpcs.first() else {
+    let Some(vpc) = vpcs.into_iter().next() else {
         return Err(db::DatabaseError::NotFoundError {
             kind: "vpc",
             id: vpc_id.to_string(),
@@ -286,7 +290,7 @@ async fn validate_service_vpc(
         )));
     }
 
-    Ok(())
+    Ok(vpc)
 }
 
 /// Updates an existing extension service
@@ -624,12 +628,21 @@ pub(crate) async fn delete(
                 // Without it the create's uncommitted reference is invisible
                 // here, and the release below would pull the allocated index
                 // out from under the newly created service.
-                let _ = db::vpc::find_by_with_lock(
+                let locked_vpc = db::vpc::find_by_with_lock(
                     txn.as_mut(),
                     db::ObjectColumnFilter::One(db::vpc::IdColumn, &service_vpc_id),
                     db::vpc::VpcRowLock::Mutation,
                 )
-                .await?;
+                .await?
+                .into_iter()
+                .next();
+
+                // This service's endpoint /127 reservations die with it.
+                // TODO(blockstorage): defer release to DPF cleanup
+                // acknowledgement once DPU config delivery exists.
+                db::service_vpc_endpoint::delete_by_extension_service(txn.as_mut(), service_id)
+                    .await?;
+
                 let still_referenced =
                     !extension_service::find_ids_by_service_vpc(&mut txn, &service_vpc_id)
                         .await?
@@ -640,6 +653,27 @@ pub(crate) async fn delete(
                         &service_vpc_id.to_string(),
                     )
                     .await?;
+
+                    // Retire the derived service-ULA /48 with the last
+                    // reference. Hard delete, not the controller's soft-delete
+                    // drain: nothing can allocate from a derived /48 (FNN
+                    // guards) and its endpoint children were removed above, so
+                    // there is nothing to drain — and leaving a
+                    // pending-deletion row would block VPC deletion until the
+                    // controller runs.
+                    if locked_vpc.is_some() {
+                        let derived = db::vpc_prefix::find_by_vpc(txn.as_mut(), service_vpc_id)
+                            .await?
+                            .into_iter()
+                            .find(|p| {
+                                p.metadata.labels.contains_key(
+                                    crate::extension_service_ula::SERVICE_VPC_ULA_LABEL,
+                                )
+                            });
+                        if let Some(derived) = derived {
+                            db::vpc_prefix::final_delete(derived.id, txn.as_mut()).await?;
+                        }
+                    }
                 }
             }
         } else {

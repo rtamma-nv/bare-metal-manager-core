@@ -2768,6 +2768,7 @@ async fn test_service_vpc_index_assignment_and_reuse(
                         version: version_a.clone(),
                         service_vpc_id: None,
                         service_vpc_index: Some(7),
+                        ..Default::default()
                     }],
                 }),
             }),
@@ -2777,6 +2778,365 @@ async fn test_service_vpc_index_assignment_and_reuse(
         .await
         .expect_err("caller-supplied service_vpc_index must be rejected");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // A fabricated attachment_id on first attach must be rejected: bindings
+    // are system-assigned, and trusting one verbatim would let a caller plant
+    // endpoints that bypass the reservation table's collision checks.
+    let err = env
+        .api
+        .allocate_instance(Request::new(rpc::InstanceAllocationRequest {
+            instance_id: None,
+            machine_id: Some(mh3.host().id),
+            instance_type_id: None,
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(default_os_config()),
+                network: Some(single_interface_network_config(segment_id)),
+                infiniband: None,
+                network_security_group_id: None,
+                nvlink: None,
+                spxconfig: None,
+                power_profile: None,
+                dpu_extension_services: Some(rpc::InstanceDpuExtensionServicesConfig {
+                    service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
+                        service_id: service_a.service_id.clone(),
+                        version: version_a.clone(),
+                        attachment_id: Some("6e1a49a2-71d4-4f8e-9c25-58c0c1a4bfab".to_string()),
+                        ..Default::default()
+                    }],
+                }),
+            }),
+            metadata: None,
+            allow_unhealthy_machine: false,
+        }))
+        .await
+        .expect_err("fabricated attachment_id must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Service VPC ULA addressing tests (DPU block-storage design §6.2)
+// ---------------------------------------------------------------------------
+
+#[crate::sqlx_test]
+async fn test_registration_derives_service_vpc_ula_prefix(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    let vpc_id = create_service_vpc(&env, "best_org", "ula vpc").await;
+    create_test_extension_service_with_vpc(&env.api, "svc-ula-a", vpc_id)
+        .await
+        .expect("create should succeed");
+
+    let root = crate::extension_service_ula::service_vpc_ula_root();
+    let mut txn = env.db_txn().await;
+    let prefixes = db::vpc_prefix::find_by_vpc(txn.as_mut(), vpc_id).await?;
+    let derived: Vec<_> = prefixes
+        .iter()
+        .filter(|p| {
+            p.metadata
+                .labels
+                .contains_key(crate::extension_service_ula::SERVICE_VPC_ULA_LABEL)
+        })
+        .collect();
+    assert_eq!(derived.len(), 1, "exactly one derived /48 per service VPC");
+    let prefix = derived[0];
+    assert_eq!(prefix.config.prefix.prefix(), 48);
+    assert!(
+        root.contains(prefix.config.prefix.network()),
+        "derived /48 must lie within the seeded ULA root"
+    );
+    assert!(
+        prefix.site_prefix_id.is_some(),
+        "derived /48 must be parented by the seeded ULA SitePrefix"
+    );
+    drop(txn);
+
+    // A second service bound to the same VPC reuses the same /48.
+    create_test_extension_service_with_vpc(&env.api, "svc-ula-b", vpc_id)
+        .await
+        .expect("second create should succeed");
+    let mut txn = env.db_txn().await;
+    let count = db::vpc_prefix::find_by_vpc(txn.as_mut(), vpc_id)
+        .await?
+        .into_iter()
+        .filter(|p| {
+            p.metadata
+                .labels
+                .contains_key(crate::extension_service_ula::SERVICE_VPC_ULA_LABEL)
+        })
+        .count();
+    assert_eq!(count, 1, "the /48 is shared, not re-derived");
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_registration_ula_collision_uses_next_probe(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    let vpc_id = create_service_vpc(&env, "best_org", "collision vpc").await;
+    let blocker_vpc_id = create_service_vpc(&env, "best_org", "blocker vpc").await;
+
+    let root = crate::extension_service_ula::service_vpc_ula_root();
+    let probe0 =
+        crate::extension_service_ula::derive_service_vpc_ula_prefix(root, vpc_id, 0).unwrap();
+    let probe1 =
+        crate::extension_service_ula::derive_service_vpc_ula_prefix(root, vpc_id, 1).unwrap();
+
+    // Occupy the probe-0 candidate with an unrelated VPC prefix.
+    let mut txn = env.db_txn().await;
+    let blocker_vpc = db::vpc::find_by_with_lock(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::vpc::IdColumn, &blocker_vpc_id),
+        db::vpc::VpcRowLock::None,
+    )
+    .await?
+    .pop()
+    .expect("blocker vpc exists");
+    db::vpc_prefix::persist(
+        model::vpc_prefix::NewVpcPrefix {
+            id: carbide_uuid::vpc::VpcPrefixId::new(),
+            site_prefix_id: None,
+            vpc_id: blocker_vpc_id,
+            config: model::vpc_prefix::VpcPrefixConfig {
+                prefix: ipnetwork::IpNetwork::V6(probe0),
+            },
+            metadata: model::metadata::Metadata {
+                name: "blocker".to_string(),
+                description: String::new(),
+                labels: Default::default(),
+            },
+        },
+        blocker_vpc.version,
+        txn.as_mut(),
+    )
+    .await?;
+    txn.commit().await?;
+
+    create_test_extension_service_with_vpc(&env.api, "svc-collision", vpc_id)
+        .await
+        .expect("create should succeed via the next probe");
+
+    let mut txn = env.db_txn().await;
+    let derived = db::vpc_prefix::find_by_vpc(txn.as_mut(), vpc_id)
+        .await?
+        .into_iter()
+        .find(|p| {
+            p.metadata
+                .labels
+                .contains_key(crate::extension_service_ula::SERVICE_VPC_ULA_LABEL)
+        })
+        .expect("derived /48 exists");
+    assert_eq!(
+        derived.config.prefix,
+        ipnetwork::IpNetwork::V6(probe1),
+        "probe-0 collision must fall through to probe 1"
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_service_delete_retires_ula_prefix_on_last_reference(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    let vpc_id = create_service_vpc(&env, "best_org", "retire vpc").await;
+    let service_a = create_test_extension_service_with_vpc(&env.api, "svc-retire-a", vpc_id)
+        .await
+        .expect("create a");
+    let service_b = create_test_extension_service_with_vpc(&env.api, "svc-retire-b", vpc_id)
+        .await
+        .expect("create b");
+
+    async fn derived_count(
+        txn: &mut sqlx::PgConnection,
+        vpc_id: carbide_uuid::vpc::VpcId,
+    ) -> Result<usize, eyre::Report> {
+        Ok(db::vpc_prefix::find_by_vpc(txn, vpc_id)
+            .await?
+            .into_iter()
+            .filter(|p| {
+                p.metadata
+                    .labels
+                    .contains_key(crate::extension_service_ula::SERVICE_VPC_ULA_LABEL)
+            })
+            .count())
+    }
+
+    env.api
+        .delete_dpu_extension_service(Request::new(rpc::DeleteDpuExtensionServiceRequest {
+            service_id: service_a.service_id.clone(),
+            versions: vec![],
+        }))
+        .await?;
+    let mut txn = env.db_txn().await;
+    assert_eq!(
+        derived_count(txn.as_mut(), vpc_id).await?,
+        1,
+        "the /48 survives while another service references the VPC"
+    );
+    drop(txn);
+
+    env.api
+        .delete_dpu_extension_service(Request::new(rpc::DeleteDpuExtensionServiceRequest {
+            service_id: service_b.service_id.clone(),
+            versions: vec![],
+        }))
+        .await?;
+    let mut txn = env.db_txn().await;
+    assert_eq!(
+        derived_count(txn.as_mut(), vpc_id).await?,
+        0,
+        "the /48 is retired with the last reference"
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_attach_creates_service_vpc_endpoints(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+
+    create_test_tenants(&env).await?;
+    let vpc_id = create_service_vpc(&env, "best_org", "endpoint vpc").await;
+    let service = create_test_extension_service_with_vpc(&env.api, "svc-endpoints", vpc_id)
+        .await
+        .expect("create service");
+    let version = service
+        .latest_version_info
+        .as_ref()
+        .unwrap()
+        .version
+        .clone();
+
+    let (_instance, _) = mh
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .extension_services(rpc::InstanceDpuExtensionServicesConfig {
+            service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
+                service_id: service.service_id.clone(),
+                version,
+                ..Default::default()
+            }],
+        })
+        .build_and_return()
+        .await;
+
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let configs = snapshot
+        .instance
+        .as_ref()
+        .unwrap()
+        .config
+        .extension_services
+        .service_configs
+        .clone();
+    assert_eq!(configs.len(), 1);
+    let binding = &configs[0];
+    let attachment_id = binding.attachment_id.expect("attachment id assigned");
+    let dpu_count = snapshot.dpu_snapshots.len();
+    assert!(dpu_count > 0, "fixture host must have DPUs");
+    assert_eq!(
+        binding.endpoints.len(),
+        dpu_count,
+        "one endpoint per DPU of the instance"
+    );
+
+    let derived_48 = db::vpc_prefix::find_by_vpc(txn.as_mut(), vpc_id)
+        .await?
+        .into_iter()
+        .find(|p| {
+            p.metadata
+                .labels
+                .contains_key(crate::extension_service_ula::SERVICE_VPC_ULA_LABEL)
+        })
+        .expect("derived /48 exists");
+    for endpoint in &binding.endpoints {
+        assert_eq!(endpoint.link_prefix.prefix(), 127);
+        assert!(
+            derived_48
+                .config
+                .prefix
+                .contains(endpoint.link_prefix.network()),
+            "endpoint {} must lie within the derived /48 {}",
+            endpoint.link_prefix,
+            derived_48.config.prefix
+        );
+        let std::net::IpAddr::V6(network) = endpoint.link_prefix.network() else {
+            panic!("expected an IPv6 endpoint prefix");
+        };
+        assert_eq!(
+            u128::from(network) & 1,
+            0,
+            "the network address is the even (HBN) end"
+        );
+    }
+
+    let rows = db::service_vpc_endpoint::find_by_attachment(txn.as_mut(), attachment_id).await?;
+    assert_eq!(rows.len(), dpu_count, "one reservation row per endpoint");
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_non_vpc_service_binding_tolerates_missing_dpu_list(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    // Regression: the DPU list is only needed to derive endpoints for NEW
+    // service-VPC bindings. A service without a service VPC must bind even
+    // when the DPU snapshot list is empty (e.g. a transient load gap).
+    let env = create_test_env(db_pool).await;
+    let service = create_test_extension_service_and_tenants(&env).await?;
+
+    let mut config = model::instance::config::extension_services::InstanceExtensionServicesConfig {
+        service_configs: vec![
+            model::instance::config::extension_services::InstanceExtensionServiceConfig {
+                service_id: service.service_id.parse().unwrap(),
+                version: service
+                    .latest_version_info
+                    .as_ref()
+                    .unwrap()
+                    .version
+                    .parse()
+                    .unwrap(),
+                removed: None,
+                service_vpc_id: None,
+                service_vpc_index: None,
+                attachment_id: None,
+                endpoints: Vec::new(),
+            },
+        ],
+    };
+
+    let mut txn = env.db_txn().await;
+    crate::instance::assign_service_vpc_bindings(
+        &mut config,
+        "best_org",
+        carbide_uuid::instance::InstanceId::new(),
+        &[],
+        8,
+        txn.as_mut(),
+    )
+    .await
+    .expect("non-VPC services must bind without a DPU list");
+    assert!(config.service_configs[0].attachment_id.is_none());
+    assert!(config.service_configs[0].endpoints.is_empty());
 
     Ok(())
 }

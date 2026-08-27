@@ -226,6 +226,9 @@ pub async fn find_allocation_candidates(
         WHERE vpc_id = ANY($1)
           -- Soft-deleted prefixes are not eligible automatic candidates.
           AND deleted IS NULL
+          -- Derived service-VPC ULA /48s are reserved for hash-derived
+          -- service endpoints, never for tenant linknet allocation.
+          AND NOT (labels ? 'carbide.nvidia.com/service-vpc-ula')
         -- Preserve ascending candidate IDs within each VPC/family lock group.
         ORDER BY vpc_id, id
     "#;

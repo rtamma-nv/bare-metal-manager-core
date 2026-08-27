@@ -90,6 +90,7 @@ pub mod redfish;
 pub mod resource_pool;
 pub mod route_server;
 pub mod secrets;
+pub mod service_vpc_endpoint;
 pub mod site_explorer;
 pub mod site_prefix;
 pub mod sku;

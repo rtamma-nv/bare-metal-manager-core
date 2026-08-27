@@ -574,6 +574,15 @@ WHERE name = $2 AND value = $3
 /// VPC id) across all per-tenant `service-vpc-index:*` pools. Used when the
 /// owning extension-service registration is deleted.
 ///
+/// The cross-pool `LIKE` is required, not a shortcut: index pools are named by
+/// *consumer* tenant (any tenant that ever attached the service), while the
+/// deleting caller only knows the *service owner's* tenant — and the set of
+/// consumer tenants is recorded nowhere but these rows. Detach deliberately
+/// does not release indices (they are stable per (tenant, VPC)), so rows from
+/// many tenants legitimately exist here. `FOR UPDATE` locks only the rows
+/// matching the owner's allocated state — at most one per consumer tenant —
+/// never whole pools.
+///
 /// Release-on-last-detach (gated on DPF-side cleanup acknowledgement, per the
 /// DPU block-storage design) is deferred to the DPU config-delivery increment.
 pub async fn release_service_vpc_indices(

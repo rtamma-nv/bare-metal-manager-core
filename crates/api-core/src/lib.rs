@@ -59,6 +59,7 @@ mod dpf_services;
 mod dynamic_settings;
 mod errors;
 mod ethernet_virtualization;
+mod extension_service_ula;
 mod handlers;
 mod instance;
 mod ipxe;
