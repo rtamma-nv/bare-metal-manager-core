@@ -22,11 +22,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
-use bmc_mock::ipmi_sim::IpmiEndpoint;
 use bmc_mock::{
-    BmcCommand, BmcEvent, BmcState, BootOptionKind, Callbacks, HostnameQuerying, MachineInfo,
-    MockPowerState, POWER_CYCLE_DELAY, SetSystemPowerError, SetSystemPowerResult,
-    SystemPowerControl,
+    BmcCommand, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
+    SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
 };
 use carbide_network::virtualization::build_dual_stack_list;
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
@@ -44,6 +42,7 @@ use crate::dhcp_wrapper::{
     DhcpRelayError, DhcpRelayResult, DhcpRequestInfo, DhcpRequester, DhcpResponseInfo,
     DpuDhcpRelay, vendor_class,
 };
+use crate::lifecycle_timings::{LifecycleTimings, PlatformTimingProfile};
 use crate::machine_fsm::{Action as FsmAction, DhcpType, Event, MachineFsm, Timer};
 use crate::machine_state_machine::MachineStateError::MissingMachineId;
 use crate::machine_utils::{
@@ -137,6 +136,7 @@ pub(super) struct MachineStateMachine {
     machine_info: MachineInfo,
     bmc_command_channel: mpsc::UnboundedSender<BmcCommand>,
     config: Arc<MachineConfig>,
+    resolved_timings: LifecycleTimings,
     app_context: Arc<MachineATronContext>,
     dpu_dhcp_relay: Option<DpuDhcpRelay>,
     dpu_dhcp_relay_handle: Option<DpuDhcpRelayHandle>,
@@ -208,10 +208,9 @@ pub(super) struct LiveState {
     pub(super) observed_machine_id: Option<MachineId>,
     pub(super) machine_ip: Option<Ipv4Addr>,
     pub(super) bmc_ip: Option<Ipv4Addr>,
-    pub(super) ipmi_endpoint: Option<IpmiEndpoint>,
+    pub(super) ipmi_port: Option<u16>,
     pub(super) ssh_endpoint_port: Option<u16>,
     pub(super) booted_os: MaybeOsImage,
-    pub(super) next_boot_kind: Option<BootOptionKind>,
     pub(super) installed_os: OsImage,
     pub(super) state_string: Option<&'static str>,
     pub(super) api_state: String,
@@ -237,10 +236,9 @@ impl Default for LiveState {
             observed_machine_id: None,
             machine_ip: None,
             bmc_ip: None,
-            ipmi_endpoint: None,
+            ipmi_port: None,
             ssh_endpoint_port: None,
             booted_os: Default::default(),
-            next_boot_kind: None,
             installed_os: Default::default(),
             state_string: None,
             api_state: "Unknown".to_string(),
@@ -277,14 +275,6 @@ impl LiveState {
             ..Default::default()
         }
     }
-
-    pub(super) fn ui_next_boot_kind(&self) -> &'static str {
-        match self.next_boot_kind {
-            Some(BootOptionKind::Disk) => "Disk",
-            Some(BootOptionKind::Network) => "Network",
-            None => "Unknown",
-        }
-    }
 }
 
 pub(super) enum PersistedMachine {
@@ -293,6 +283,47 @@ pub(super) enum PersistedMachine {
 }
 
 impl MachineStateMachine {
+    /// Resolve the per-role [`LifecycleTimings`] for this machine from its config.
+    ///
+    /// Selects host or DPU timings from the [`PlatformTimingProfile`] based on
+    /// `machine_info`. Called once at construction time; the result is stored on
+    /// the state machine so timer arms read a single field rather than branching
+    /// on `machine_info` and reaching into the config.
+    fn resolve_timings(machine_info: &MachineInfo, config: &MachineConfig) -> LifecycleTimings {
+        let profile = PlatformTimingProfile::for_hardware_type(&config.hw_type);
+        let base = match machine_info {
+            MachineInfo::Dpu(_) => profile.dpu,
+            MachineInfo::Host(_) => profile.host,
+        };
+        let overrides_for_role = config
+            .timing_overrides
+            .as_ref()
+            .map(|o| match machine_info {
+                MachineInfo::Dpu(_) => &o.dpu,
+                MachineInfo::Host(_) => &o.host,
+            });
+        let after_overrides = match overrides_for_role {
+            Some(o) => base.with_overrides(o),
+            None => base,
+        };
+        let resolved = after_overrides.scale(config.acceleration_factor);
+        tracing::info!(
+            hw_type = ?config.hw_type,
+            role = match machine_info {
+                MachineInfo::Dpu(_) => "dpu",
+                MachineInfo::Host(_) => "host",
+            },
+            acceleration_factor = config.acceleration_factor,
+            has_overrides = overrides_for_role.is_some(),
+            reboot = ?resolved.reboot,
+            power_on_os_ready = ?resolved.power_on_os_ready,
+            power_off_force = ?resolved.power_off_force,
+            bmc_reset = ?resolved.bmc_reset,
+            "Resolved lifecycle timings"
+        );
+        resolved
+    }
+
     pub(super) fn from_persisted(
         persisted_machine: PersistedMachine,
         machine_info: MachineInfo,
@@ -307,6 +338,7 @@ impl MachineStateMachine {
             PersistedMachine::Dpu(d) => (d.installed_os, None),
         };
         let (fsm, actions) = MachineFsm::init(true, Self::is_bmc_only(&machine_info, &config));
+        let resolved_timings = Self::resolve_timings(&machine_info, &config);
         MachineStateMachine {
             fsm,
             actions: actions.into_iter().collect(),
@@ -330,6 +362,7 @@ impl MachineStateMachine {
             machine_info,
             bmc_command_channel,
             config,
+            resolved_timings,
             app_context,
             dpu_dhcp_relay,
             dpu_dhcp_relay_handle: None,
@@ -347,6 +380,7 @@ impl MachineStateMachine {
         mat_host_id: Uuid,
     ) -> MachineStateMachine {
         let (fsm, actions) = MachineFsm::init(false, Self::is_bmc_only(&machine_info, &config));
+        let resolved_timings = Self::resolve_timings(&machine_info, &config);
         MachineStateMachine {
             live_state: Arc::new(RwLock::new(LiveState::for_machine(
                 &machine_info,
@@ -370,6 +404,7 @@ impl MachineStateMachine {
             machine_info,
             bmc_command_channel,
             config,
+            resolved_timings,
             app_context,
             dpu_dhcp_relay,
             dpu_dhcp_relay_handle: None,
@@ -438,15 +473,20 @@ impl MachineStateMachine {
                     Err(_) => return Some(self.config.run_interval_working),
                 },
                 FsmAction::SetTimer(Timer::PowerCycle) => {
-                    self.power_cycle_deadline = Some(Instant::now() + POWER_CYCLE_DELAY);
+                    tracing::info!(
+                        duration = ?self.resolved_timings.power_off_force,
+                        "Timer armed: PowerCycle (power_off_force)"
+                    );
+                    self.power_cycle_deadline =
+                        Some(Instant::now() + self.resolved_timings.power_off_force);
                     self.actions.pop_front();
                 }
                 FsmAction::SetTimer(Timer::MachineOn) => {
-                    let delay = match self.machine_info {
-                        MachineInfo::Dpu(_) => self.config.dpu_reboot_delay,
-                        MachineInfo::Host(_) => self.config.host_reboot_delay,
-                    };
-                    self.machine_on_deadline = Some(Instant::now() + Duration::from_secs(delay));
+                    tracing::info!(
+                        duration = ?self.resolved_timings.reboot,
+                        "Timer armed: MachineOn (reboot)"
+                    );
+                    self.machine_on_deadline = Some(Instant::now() + self.resolved_timings.reboot);
                     self.actions.pop_front();
                 }
                 FsmAction::SetTimer(Timer::ScoutAgentControlPoll) => {
@@ -935,10 +975,10 @@ impl MachineStateMachine {
         live_state.is_up = self.fsm.is_up();
         live_state.machine_ip = self.machine_ip();
         live_state.bmc_ip = self.bmc_ip();
-        live_state.ipmi_endpoint = self
+        live_state.ipmi_port = self
             .bmc_mock
             .as_ref()
-            .and_then(|bmc_mock| bmc_mock.ipmi_endpoint());
+            .and_then(|bmc_mock| bmc_mock.ipmi_port());
         live_state.ssh_endpoint_port = self
             .bmc_mock
             .as_ref()
@@ -952,10 +992,6 @@ impl MachineStateMachine {
         live_state.state_string = Some(self.fsm.state_string());
         live_state.power_state = self.fsm.power_state();
         live_state.booted_os = self.booted_os();
-        live_state.next_boot_kind = self
-            .bmc_state
-            .as_ref()
-            .and_then(|state| state.system_state.resolve_current_boot_selection());
         live_state.dpu_flipped_to_nic_mode = matches!(&self.machine_info, MachineInfo::Dpu(_))
             && self
                 .bmc_state
@@ -1208,6 +1244,8 @@ impl MachineStateMachine {
             Arc::new(LiveStateHostnameQuery(self.live_state.clone())),
             self.mat_host_id,
             self.bmc_injection.clone(),
+            // wires LifecycleTimings::bmc_reset (epic #3796 issue 4)
+            Some(self.resolved_timings.bmc_reset),
         );
 
         let pw_override = match &self.machine_info {
