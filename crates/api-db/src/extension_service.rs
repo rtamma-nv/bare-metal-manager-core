@@ -1172,6 +1172,7 @@ mod test_batched_lookups {
             "{\"chart\": \"example\"}",
             None,
             false,
+            None,
         )
         .await
         .expect("create DPF Helm chart service");
