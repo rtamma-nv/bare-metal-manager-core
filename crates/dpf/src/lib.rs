@@ -74,10 +74,14 @@ pub use error::DpfError;
 pub use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 pub use repository::{DpfRepository, KubeRepository};
 pub use sdk::{
-    DpfSdk, DpfSdkBuilder, DpuProvisioningSource, NoLabels, ResourceLabeler, build_deployment,
-    build_effective_dpu_interfaces, build_service_configuration, build_service_interface,
-    build_service_nad, build_service_template, calculate_pf_total_sf, dpu_cr_name,
-    dpu_device_cr_name, dpu_node_cr_name, node_id_from_dpu_node_cr_name,
+    DPU_MACHINE_ID_NODE_LABEL, DpfSdk, DpfSdkBuilder, DpuProvisioningSource, NoLabels,
+    ResourceLabeler, SERVICE_VPC_ATTACHMENT_ID_LABEL, SERVICE_VPC_OWNED_BY_LABEL,
+    SERVICE_VPC_OWNED_BY_VALUE, build_deployment, build_effective_dpu_interfaces,
+    build_service_configuration, build_service_interface, build_service_nad,
+    build_service_template, build_service_vpc_chain, build_service_vpc_interface,
+    build_service_vpc_nad, calculate_pf_total_sf, dpu_cr_name, dpu_device_cr_name,
+    dpu_node_cr_name, node_id_from_dpu_node_cr_name, service_vpc_attachment_selector,
+    service_vpc_bridge_name, service_vpc_cr_name,
 };
 pub use services::{DEFAULT_DOCA_HELM_REGISTRY, ServiceRegistryConfig};
 pub use types::{
@@ -88,7 +92,7 @@ pub use types::{
     DpuReadyEvent, DpuServiceHelmChartObservation, DpuServiceObservation, DpuServiceVersion,
     InitDpfResourcesConfig, MaintenanceEvent, RebootRequiredEvent, ServiceChainSwitch,
     ServiceConfigPort, ServiceConfigPortProtocol, ServiceDefinition, ServiceInterface, ServiceNAD,
-    ServiceNADResourceType,
+    ServiceNADResourceType, ServiceVpcAttachmentRequest,
 };
 pub use watcher::{DpuWatcher, DpuWatcherBuilder};
 

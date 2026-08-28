@@ -174,6 +174,19 @@ pub(crate) async fn create(
         .await?;
     }
 
+    // A site pinned to one global VPC VNI can never realize service-VPC
+    // shadow VRFs, so a VPC-bound registration is unsupported there
+    // (design section 6.3). Fail at registration rather than at first attach.
+    if req.service_vpc_id.is_some()
+        && let Some(vni) = api.runtime_config.site_global_vpc_vni
+    {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "service-VPC-bound extension services are unsupported on this site \
+             (site_global_vpc_vni={vni} pins all VRFs to a single VNI)"
+        ))
+        .into());
+    }
+
     // Finally, create the extension in the database. If this fails, the vault credential will be removed.
     let (service, version) = match api
         .with_txn(|txn| {
@@ -611,6 +624,10 @@ pub(crate) async fn delete(
     let deleted_versions =
         extension_service::soft_delete_versions(&mut txn, service_id, &versions).await?;
 
+    // Attachment ids of endpoint rows removed below; their DPF CRs are swept
+    // best-effort after the transaction commits.
+    let mut removed_attachment_ids = Vec::new();
+
     // If no version was actually deleted in the last step, we don't need to do anything
     if !deleted_versions.is_empty() {
         // If the service has no versions left, delete the service
@@ -637,11 +654,13 @@ pub(crate) async fn delete(
                 .into_iter()
                 .next();
 
-                // This service's endpoint /127 reservations die with it.
-                // TODO(blockstorage): defer release to DPF cleanup
-                // acknowledgement once DPU config delivery exists.
-                db::service_vpc_endpoint::delete_by_extension_service(txn.as_mut(), service_id)
-                    .await?;
+                // Registration delete is an immediate path: this service's
+                // endpoint /127 reservations die with it. (No instance can be
+                // using it — is_service_in_use rejected that above — so any
+                // rows here are already orphaned.)
+                removed_attachment_ids =
+                    db::service_vpc_endpoint::delete_by_extension_service(txn.as_mut(), service_id)
+                        .await?;
 
                 let still_referenced =
                     !extension_service::find_ids_by_service_vpc(&mut txn, &service_vpc_id)
@@ -683,6 +702,24 @@ pub(crate) async fn delete(
     }
 
     txn.commit().await?;
+
+    // Best-effort removal of any DPF service-VPC CRs left by the deleted
+    // rows. The rows are already gone; the ownership labels let a later
+    // sweep collect anything missed here.
+    if let Some(dpf_sdk) = api.dpf_sdk.as_ref() {
+        for attachment_id in &removed_attachment_ids {
+            if let Err(error) = dpf_sdk
+                .remove_service_vpc_attachments(&attachment_id.to_string())
+                .await
+            {
+                tracing::warn!(
+                    %attachment_id,
+                    %error,
+                    "Failed to remove service-VPC CRs during extension-service delete"
+                );
+            }
+        }
+    }
 
     // Delete credentials from Vault for the deleted versions that had credentials
     // Note: This happens after the transaction commit, so it's best-effort cleanup

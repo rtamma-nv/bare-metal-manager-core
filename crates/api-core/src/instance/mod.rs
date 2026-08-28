@@ -1497,6 +1497,7 @@ pub(crate) async fn assign_service_vpc_bindings(
     instance_id: InstanceId,
     dpu_ids: &[MachineId],
     max_service_vpcs_per_tenant: u32,
+    site_global_vpc_vni: Option<u32>,
     txn: &mut sqlx::PgConnection,
 ) -> Result<(), CarbideError> {
     let active_ids: Vec<_> = extension_services
@@ -1660,7 +1661,7 @@ pub(crate) async fn assign_service_vpc_bindings(
                     service.service_id
                 )));
             }
-            let recorded_endpoints: Vec<
+            let mut recorded_endpoints: Vec<
                 model::instance::config::extension_services::InstanceExtensionServiceVpcEndpointConfig,
             > = existing_rows
                 .iter()
@@ -1690,9 +1691,83 @@ pub(crate) async fn assign_service_vpc_bindings(
                     )));
                 }
             }
+
+            // The reservations must cover the instance's current DPUs: a DPU
+            // added after the binding was created (swap/repair) has no /127
+            // yet, so derive and persist the missing rows under the recorded
+            // attachment id. An empty DPU list (transient snapshot gap) adds
+            // nothing and changes nothing.
+            let covered: std::collections::HashSet<MachineId> =
+                existing_rows.iter().map(|row| row.dpu_machine_id).collect();
+            let missing_dpus: Vec<MachineId> = dpu_ids
+                .iter()
+                .filter(|dpu_id| !covered.contains(dpu_id))
+                .copied()
+                .collect();
+            if !missing_dpus.is_empty() {
+                let (vpc_prefix_id, service_prefix_v6) =
+                    resolve_service_vpc_ula(&mut *txn, &mut ula_prefixes, service_vpc_id).await?;
+                let mut new_rows = Vec::with_capacity(missing_dpus.len());
+                for dpu_id in &missing_dpus {
+                    let link_prefix = crate::extension_service_ula::derive_endpoint_prefix(
+                        service_prefix_v6,
+                        recorded_attachment,
+                        dpu_id,
+                    )?;
+                    recorded_endpoints.push(
+                        model::instance::config::extension_services::
+                            InstanceExtensionServiceVpcEndpointConfig {
+                            dpu_id: *dpu_id,
+                            link_prefix: ipnetwork::IpNetwork::V6(link_prefix),
+                        },
+                    );
+                    new_rows.push(model::service_vpc_endpoint::NewServiceVpcEndpoint {
+                        attachment_id: recorded_attachment,
+                        dpu_machine_id: *dpu_id,
+                        extension_service_id: service.service_id,
+                        instance_id,
+                        vpc_prefix_id,
+                        vpc_prefix: ipnetwork::IpNetwork::V6(service_prefix_v6),
+                        prefix: ipnetwork::IpNetwork::V6(link_prefix),
+                    });
+                }
+                match db::service_vpc_endpoint::persist_all(&mut *txn, &new_rows).await {
+                    Ok(_) => {}
+                    Err(db::service_vpc_endpoint::ServiceVpcEndpointError::PrefixCollision) => {
+                        // Unlike a first attach, the attachment id cannot be
+                        // re-minted here without renumbering the binding's
+                        // existing endpoints, so the (astronomically
+                        // unlikely) collision is surfaced instead.
+                        return Err(CarbideError::FailedPrecondition(format!(
+                            "service-VPC endpoint derivation for extension service {} \
+                             collides with an existing reservation on a newly added DPU; \
+                             detach and re-attach the service to re-mint its attachment id",
+                            service.service_id
+                        )));
+                    }
+                    Err(db::service_vpc_endpoint::ServiceVpcEndpointError::Database(e)) => {
+                        return Err(e.into());
+                    }
+                }
+            }
+
             service.attachment_id = Some(recorded_attachment);
             service.endpoints = recorded_endpoints;
         } else {
+            // A site pinned to one global VPC VNI cannot realize a second VRF
+            // on the DPU, so NEW service-VPC bindings are refused there
+            // (design section 6.3). Deliberately scoped to first attaches: a
+            // binding that predates the pin keeps validating (and
+            // backfilling) so unrelated extension-service changes on its
+            // instance are not blocked.
+            if let Some(vni) = site_global_vpc_vni {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "extension service {} requires a service VPC shadow VRF, which is \
+                     unsupported on this site (site_global_vpc_vni={vni} pins all VRFs \
+                     to a single VNI)",
+                    service.service_id
+                )));
+            }
             if service.attachment_id.is_some() || !service.endpoints.is_empty() {
                 return Err(CarbideError::InvalidArgument(format!(
                     "attachment_id/endpoints are system-assigned; they must not \
@@ -1707,36 +1782,8 @@ pub(crate) async fn assign_service_vpc_bindings(
                         .to_string(),
                 ));
             }
-            let service_prefix = match ula_prefixes.get(&service_vpc_id) {
-                Some(prefix) => *prefix,
-                None => {
-                    let derived = db::vpc_prefix::find_by_vpc(&mut *txn, service_vpc_id)
-                        .await?
-                        .into_iter()
-                        .find(|p| {
-                            p.metadata
-                                .labels
-                                .contains_key(crate::extension_service_ula::SERVICE_VPC_ULA_LABEL)
-                        });
-                    let Some(derived) = derived else {
-                        return Err(CarbideError::FailedPrecondition(format!(
-                            "service VPC {service_vpc_id} has no derived ULA /48; \
-                             re-register the extension service"
-                        )));
-                    };
-                    let ipnetwork::IpNetwork::V6(prefix) = derived.config.prefix else {
-                        return Err(CarbideError::internal(format!(
-                            "derived service-VPC prefix {} is not IPv6",
-                            derived.config.prefix
-                        )));
-                    };
-                    ula_prefixes.insert(service_vpc_id, (derived.id, prefix));
-                    *ula_prefixes
-                        .get(&service_vpc_id)
-                        .expect("inserted immediately above")
-                }
-            };
-            let (vpc_prefix_id, service_prefix_v6) = service_prefix;
+            let (vpc_prefix_id, service_prefix_v6) =
+                resolve_service_vpc_ula(&mut *txn, &mut ula_prefixes, service_vpc_id).await?;
 
             let mut assigned = false;
             for _ in 0..MAX_ATTACHMENT_ATTEMPTS {
@@ -1800,6 +1847,43 @@ pub(crate) async fn assign_service_vpc_bindings(
     }
 
     Ok(())
+}
+
+/// Resolves (and caches per call site) the labeled ULA /48 derived for a
+/// service VPC at registration time.
+async fn resolve_service_vpc_ula(
+    txn: &mut sqlx::PgConnection,
+    cache: &mut HashMap<
+        carbide_uuid::vpc::VpcId,
+        (carbide_uuid::vpc::VpcPrefixId, ipnetwork::Ipv6Network),
+    >,
+    service_vpc_id: carbide_uuid::vpc::VpcId,
+) -> Result<(carbide_uuid::vpc::VpcPrefixId, ipnetwork::Ipv6Network), CarbideError> {
+    if let Some(prefix) = cache.get(&service_vpc_id) {
+        return Ok(*prefix);
+    }
+    let derived = db::vpc_prefix::find_by_vpc(&mut *txn, service_vpc_id)
+        .await?
+        .into_iter()
+        .find(|p| {
+            p.metadata
+                .labels
+                .contains_key(crate::extension_service_ula::SERVICE_VPC_ULA_LABEL)
+        });
+    let Some(derived) = derived else {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "service VPC {service_vpc_id} has no derived ULA /48; \
+             re-register the extension service"
+        )));
+    };
+    let ipnetwork::IpNetwork::V6(prefix) = derived.config.prefix else {
+        return Err(CarbideError::internal(format!(
+            "derived service-VPC prefix {} is not IPv6",
+            derived.config.prefix
+        )));
+    };
+    cache.insert(service_vpc_id, (derived.id, prefix));
+    Ok((derived.id, prefix))
 }
 
 /// Allocates an instance for a tenant
@@ -2166,6 +2250,7 @@ pub(crate) async fn batch_allocate_instances(
                 request.instance_id,
                 &dpu_ids,
                 api.runtime_config.max_service_vpcs_per_tenant,
+                api.runtime_config.site_global_vpc_vni,
                 txn.as_mut(),
             )
             .await?;

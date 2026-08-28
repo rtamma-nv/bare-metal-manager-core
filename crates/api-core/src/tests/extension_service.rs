@@ -29,7 +29,10 @@ use tonic::Request;
 use uuid::Uuid;
 
 use crate::api::Api;
-use crate::tests::common::api_fixtures::{TestEnv, create_managed_host, create_test_env};
+use crate::tests::common::api_fixtures::{
+    TestEnv, TestEnvOverrides, create_managed_host, create_test_env,
+    create_test_env_with_overrides, get_config,
+};
 
 const TEST_SERVICE_DATA: &str = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n    - name: app\n      image: nginx:1.27";
 const TEST_SERVICE_DATA_VERSION_2: &str = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: version-2\nspec:\n  containers:\n    - name: app\n      image: nginx:1.27";
@@ -3131,12 +3134,332 @@ async fn test_non_vpc_service_binding_tolerates_missing_dpu_list(
         carbide_uuid::instance::InstanceId::new(),
         &[],
         8,
+        None,
         txn.as_mut(),
     )
     .await
     .expect("non-VPC services must bind without a DPU list");
     assert!(config.service_configs[0].attachment_id.is_none());
     assert!(config.service_configs[0].endpoints.is_empty());
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_managed_host_network_config_includes_service_interfaces(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+
+    create_test_tenants(&env).await?;
+    let vpc_id = create_service_vpc(&env, "best_org", "iface vpc").await;
+    let bound = create_test_extension_service_with_vpc(&env.api, "svc-bound", vpc_id)
+        .await
+        .expect("create bound service");
+    let bound_version = bound.latest_version_info.as_ref().unwrap().version.clone();
+    // A plain (non-VPC) service must not produce a service interface.
+    let plain = create_test_extension_service(&env.api, "svc-plain", None).await?;
+    let plain_version = plain.latest_version_info.as_ref().unwrap().version.clone();
+
+    let (_instance, _) = mh
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .extension_services(rpc::InstanceDpuExtensionServicesConfig {
+            service_configs: vec![
+                rpc::InstanceDpuExtensionServiceConfig {
+                    service_id: bound.service_id.clone(),
+                    version: bound_version,
+                    ..Default::default()
+                },
+                rpc::InstanceDpuExtensionServiceConfig {
+                    service_id: plain.service_id.clone(),
+                    version: plain_version,
+                    ..Default::default()
+                },
+            ],
+        })
+        .build_and_return()
+        .await;
+
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let binding = snapshot
+        .instance
+        .as_ref()
+        .unwrap()
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .find(|c| c.attachment_id.is_some())
+        .expect("the bound service has an attachment")
+        .clone();
+    txn.commit().await?;
+
+    let attachment_id = binding.attachment_id.unwrap();
+    let service_vpc_index = binding.service_vpc_index.expect("index assigned");
+    let dpu_id = mh.dpu().id;
+
+    let response = env
+        .api
+        .get_managed_host_network_config(Request::new(rpc::ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_id),
+        }))
+        .await?
+        .into_inner();
+
+    assert_eq!(
+        response.service_interfaces.len(),
+        1,
+        "only the VPC-bound service produces a service interface"
+    );
+    let iface = &response.service_interfaces[0];
+    assert_eq!(iface.service_id, bound.service_id);
+    assert_eq!(iface.attachment_id, attachment_id.to_string());
+    assert_eq!(iface.service_vpc_index, service_vpc_index);
+    let expected_prefix = binding
+        .endpoints
+        .iter()
+        .find(|e| e.dpu_id == dpu_id)
+        .expect("an endpoint reserved for the requesting DPU")
+        .link_prefix
+        .to_string();
+    assert_eq!(
+        iface.link_prefix, expected_prefix,
+        "the interface carries the /127 reserved for exactly this DPU"
+    );
+    assert!(
+        iface.network_security_group.is_none(),
+        "the service VPC has no NSG and there is no instance-NSG fallback"
+    );
+    assert_eq!(iface.mtu, None);
+
+    // A stale service_vpc_id (an invariant violation — VPC deletion is
+    // blocked while referenced) must degrade to omitting that service's
+    // interface, not fail the DPU's entire network-config RPC.
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let instance = snapshot.instance.as_ref().unwrap();
+    let mut doctored = instance.config.extension_services.clone();
+    for svc in doctored
+        .service_configs
+        .iter_mut()
+        .filter(|s| s.attachment_id.is_some())
+    {
+        svc.service_vpc_id = Some(carbide_uuid::vpc::VpcId::from(Uuid::new_v4()));
+    }
+    db::instance::update_extension_services_config(
+        txn.as_mut(),
+        instance.id,
+        instance.extension_services_config_version,
+        &doctored,
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let response = env
+        .api
+        .get_managed_host_network_config(Request::new(rpc::ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_id),
+        }))
+        .await
+        .expect("a stale VPC reference must not fail the RPC")
+        .into_inner();
+    assert!(
+        response.service_interfaces.is_empty(),
+        "the broken service's interface is omitted"
+    );
+    assert_eq!(
+        response.dpu_extension_services.len(),
+        2,
+        "the rest of the response stays intact"
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_service_vpc_binding_rejected_on_single_vni_site(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+    let vpc_id = create_service_vpc(&env, "best_org", "single vni vpc").await;
+    let service = create_test_extension_service_with_vpc(&env.api, "svc-single-vni", vpc_id)
+        .await
+        .expect("create bound service");
+
+    let mut config = model::instance::config::extension_services::InstanceExtensionServicesConfig {
+        service_configs: vec![
+            model::instance::config::extension_services::InstanceExtensionServiceConfig {
+                service_id: service.service_id.parse().unwrap(),
+                version: service
+                    .latest_version_info
+                    .as_ref()
+                    .unwrap()
+                    .version
+                    .parse()
+                    .unwrap(),
+                removed: None,
+                service_vpc_id: None,
+                service_vpc_index: None,
+                attachment_id: None,
+                endpoints: Vec::new(),
+            },
+        ],
+    };
+
+    let mut txn = env.db_txn().await;
+    let err = crate::instance::assign_service_vpc_bindings(
+        &mut config,
+        "best_org",
+        carbide_uuid::instance::InstanceId::new(),
+        &[],
+        8,
+        Some(4242),
+        txn.as_mut(),
+    )
+    .await
+    .expect_err("binding a VPC-bound service on a single-VNI site must fail");
+    assert!(
+        err.to_string().contains("site_global_vpc_vni"),
+        "unexpected error: {err}"
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_registration_with_service_vpc_rejected_on_single_vni_site(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let mut config = get_config();
+    config.site_global_vpc_vni = Some(4242);
+    let env = create_test_env_with_overrides(db_pool, TestEnvOverrides::with_config(config)).await;
+
+    create_test_tenants(&env).await?;
+    let vpc_id = create_service_vpc(&env, "best_org", "single vni vpc").await;
+    let err = create_test_extension_service_with_vpc(&env.api, "svc-vni-reject", vpc_id)
+        .await
+        .expect_err("creating a VPC-bound registration on a single-VNI site must fail");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+    // A plain registration is still accepted on the same site.
+    create_test_extension_service(&env.api, "svc-plain-ok", None).await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_binding_backfills_endpoints_for_added_dpu(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+
+    create_test_tenants(&env).await?;
+    let vpc_id = create_service_vpc(&env, "best_org", "backfill vpc").await;
+    let service = create_test_extension_service_with_vpc(&env.api, "svc-backfill", vpc_id)
+        .await
+        .expect("create service");
+    let version = service
+        .latest_version_info
+        .as_ref()
+        .unwrap()
+        .version
+        .clone();
+
+    let (_instance, _) = mh
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .extension_services(rpc::InstanceDpuExtensionServicesConfig {
+            service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
+                service_id: service.service_id.clone(),
+                version,
+                ..Default::default()
+            }],
+        })
+        .build_and_return()
+        .await;
+
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let instance = snapshot.instance.as_ref().unwrap();
+    let mut config = instance.config.extension_services.clone();
+    let attachment_id = config.service_configs[0]
+        .attachment_id
+        .expect("attachment assigned at allocation");
+    assert_eq!(config.service_configs[0].endpoints.len(), 1);
+
+    // A DPU appears on the instance after the binding was created
+    // (swap/repair): re-running binding assignment backfills its /127 under
+    // the same attachment instead of leaving it silently unprovisioned.
+    // Passing a site_global_vpc_vni also proves the single-VNI guard only
+    // blocks NEW bindings — one that predates the pin keeps validating and
+    // backfilling, so unrelated config changes on its instance still work.
+    let existing_dpu = snapshot.dpu_snapshots[0].id;
+    let added_dpu: carbide_uuid::machine::MachineId =
+        "fm100ds27v4uuq7sgs4gsjummskt0b3tedugtpevjrbfh6su081n9jufcq0"
+            .parse()
+            .unwrap();
+    assert_ne!(existing_dpu, added_dpu);
+
+    let tenant_org = instance.config.tenant.tenant_organization_id.clone();
+    let instance_id = instance.id;
+    crate::instance::assign_service_vpc_bindings(
+        &mut config,
+        tenant_org.as_str(),
+        instance_id,
+        &[existing_dpu, added_dpu],
+        8,
+        Some(4242),
+        txn.as_mut(),
+    )
+    .await
+    .expect("backfill for the added DPU must succeed despite the single-VNI pin");
+
+    let binding = &config.service_configs[0];
+    assert_eq!(
+        binding.attachment_id,
+        Some(attachment_id),
+        "the attachment id is stable across the backfill"
+    );
+    assert_eq!(binding.endpoints.len(), 2);
+    let backfilled = binding
+        .endpoints
+        .iter()
+        .find(|e| e.dpu_id == added_dpu)
+        .expect("the added DPU got an endpoint");
+    assert_eq!(backfilled.link_prefix.prefix(), 127);
+
+    let rows = db::service_vpc_endpoint::find_by_attachment(txn.as_mut(), attachment_id).await?;
+    assert_eq!(rows.len(), 2, "the new reservation row is persisted");
+    for row in &rows {
+        assert!(
+            row.vpc_prefix.contains(row.prefix.network()),
+            "every endpoint stays inside the derived /48"
+        );
+    }
+
+    // Re-running with the same DPU list changes nothing.
+    crate::instance::assign_service_vpc_bindings(
+        &mut config,
+        tenant_org.as_str(),
+        instance_id,
+        &[existing_dpu, added_dpu],
+        8,
+        Some(4242),
+        txn.as_mut(),
+    )
+    .await
+    .expect("re-running the assignment must be idempotent");
+    assert_eq!(config.service_configs[0].endpoints.len(), 2);
+    let rows = db::service_vpc_endpoint::find_by_attachment(txn.as_mut(), attachment_id).await?;
+    assert_eq!(rows.len(), 2);
 
     Ok(())
 }

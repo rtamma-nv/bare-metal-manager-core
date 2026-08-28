@@ -702,6 +702,23 @@ pub struct DpuDeviceInfo {
     pub is_primary: bool,
 }
 
+/// One (extension-service attachment, DPU) pair whose service-VPC CRs
+/// (DPUServiceNAD, DPUServiceInterface, DPUServiceChain) the SDK ensures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceVpcAttachmentRequest {
+    /// Attachment id (UUID) allocated when the service was bound to the instance.
+    pub attachment_id: String,
+    /// DPF `serviceID` of the extension service consuming the interface.
+    pub service_id: String,
+    /// Per-tenant service VPC index; selects the `br-vpc{index}` bridge.
+    pub service_vpc_index: u32,
+    /// Carbide machine id of the DPU the CRs are pinned to.
+    pub dpu_machine_id: String,
+    /// Raw DPF device id (no `device-` prefix), used to stamp the machine-id
+    /// label onto the DPU-cluster node via `DPUDevice.spec.cluster.nodeLabels`.
+    pub dpu_device_id: String,
+}
+
 /// Information about a DPU node (host with DPUs).
 #[derive(Debug, Clone)]
 pub struct DpuNodeInfo {

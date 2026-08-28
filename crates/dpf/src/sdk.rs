@@ -47,6 +47,13 @@ use crate::crds::dpunodes_generated::{
     DPUNode, DpuNodeDpus, DpuNodeNodeRebootMethod, DpuNodeNodeRebootMethodExternal, DpuNodeSpec,
 };
 use crate::crds::dpus_generated::DPU;
+use crate::crds::dpuservicechains_generated::{
+    DPUServiceChain, DpuServiceChainSpec, DpuServiceChainTemplate, DpuServiceChainTemplateSpec,
+    DpuServiceChainTemplateSpecNodeSelector, DpuServiceChainTemplateSpecTemplate,
+    DpuServiceChainTemplateSpecTemplateSpec, DpuServiceChainTemplateSpecTemplateSpecSwitches,
+    DpuServiceChainTemplateSpecTemplateSpecSwitchesPorts,
+    DpuServiceChainTemplateSpecTemplateSpecSwitchesPortsServiceInterface,
+};
 use crate::crds::dpuserviceconfigurations_generated::{
     DPUServiceConfiguration, DpuServiceConfigurationInterfaces,
     DpuServiceConfigurationServiceConfiguration,
@@ -71,6 +78,7 @@ use crate::crds::dpuserviceinterfaces_generated::{
     DpuServiceInterfaceTemplateSpecTemplateSpecPfNicSelector,
     DpuServiceInterfaceTemplateSpecTemplateSpecPfNicSelectorType,
     DpuServiceInterfaceTemplateSpecTemplateSpecPhysical,
+    DpuServiceInterfaceTemplateSpecTemplateSpecService,
     DpuServiceInterfaceTemplateSpecTemplateSpecVf,
     DpuServiceInterfaceTemplateSpecTemplateSpecVfNicSelector,
     DpuServiceInterfaceTemplateSpecTemplateSpecVfNicSelectorType,
@@ -106,7 +114,7 @@ use crate::types::{
     DpuServiceInterfaceTemplateType, DpuServiceObservation, DpuServiceVersion, DpuSummary,
     FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig, MAX_BLUEFIELD_VFS_PER_PF,
     OTEL_COLLECTOR_SERVICE_NAME, ServiceConfigPortProtocol, ServiceDefinition,
-    ServiceNADResourceType, ServiceTemplateVersion,
+    ServiceNADResourceType, ServiceTemplateVersion, ServiceVpcAttachmentRequest,
 };
 use crate::watcher::DpuWatcherBuilder;
 
@@ -926,6 +934,209 @@ pub fn build_service_nad(
         },
         status: None,
     })
+}
+
+/// Marks a CR as owned by a service-VPC attachment (paired with
+/// [`SERVICE_VPC_OWNED_BY_VALUE`]); cleanup selects on it so it never touches
+/// CRs owned by other subsystems.
+pub const SERVICE_VPC_OWNED_BY_LABEL: &str = "carbide.nvidia.com/owned-by";
+pub const SERVICE_VPC_OWNED_BY_VALUE: &str = "service-vpc-attachment";
+/// Carries the attachment id (UUID simple form) on every CR of one attachment,
+/// across all of its DPUs.
+pub const SERVICE_VPC_ATTACHMENT_ID_LABEL: &str = "carbide.nvidia.com/attachment-id";
+/// Per-DPU label carbide merges into `DPUDevice.spec.cluster.nodeLabels`; DPF
+/// applies it to that DPU's DPU-cluster Node, so interface/chain node
+/// selectors can target exactly one DPU.
+pub const DPU_MACHINE_ID_NODE_LABEL: &str = "carbide.nvidia.com/dpu-machine-id";
+
+/// Deterministic CR name shared by the NAD, DPUServiceInterface, and
+/// DPUServiceChain of one (attachment, DPU) pair: 44 chars, so re-applies
+/// converge on the same objects.
+pub fn service_vpc_cr_name(attachment_id: &str, dpu_machine_id: &str) -> String {
+    let attachment = attachment_id.replace('-', "");
+    let dpu_hash = hex::encode(&Sha256::digest(dpu_machine_id.as_bytes())[..4]);
+    format!("sv-{attachment}-{dpu_hash}")
+}
+
+/// Label selector matching every CR of one attachment, on all DPUs.
+pub fn service_vpc_attachment_selector(attachment_id: &str) -> String {
+    format!(
+        "{SERVICE_VPC_OWNED_BY_LABEL}={SERVICE_VPC_OWNED_BY_VALUE},{SERVICE_VPC_ATTACHMENT_ID_LABEL}={}",
+        attachment_id.replace('-', "")
+    )
+}
+
+fn service_vpc_labels(attachment_id: &str, dpu_machine_id: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            SERVICE_VPC_OWNED_BY_LABEL.to_string(),
+            SERVICE_VPC_OWNED_BY_VALUE.to_string(),
+        ),
+        (
+            SERVICE_VPC_ATTACHMENT_ID_LABEL.to_string(),
+            attachment_id.replace('-', ""),
+        ),
+        (
+            DPU_MACHINE_ID_NODE_LABEL.to_string(),
+            dpu_machine_id.to_string(),
+        ),
+    ])
+}
+
+fn service_vpc_node_selector(dpu_machine_id: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([(
+        DPU_MACHINE_ID_NODE_LABEL.to_string(),
+        dpu_machine_id.to_string(),
+    )])
+}
+
+/// OVS bridge carrying one service VPC's traffic on a DPU; the agent programs
+/// the same name from `service_vpc_index`, which is how the two channels meet.
+pub fn service_vpc_bridge_name(service_vpc_index: u32) -> String {
+    format!("br-vpc{service_vpc_index}")
+}
+
+/// Interface name handed to the service workload (≤15 chars for Linux).
+fn service_vpc_interface_name(service_vpc_index: u32) -> String {
+    format!("vpc{service_vpc_index}")
+}
+
+/// NAD backing one service-VPC attachment on one DPU: an SF port on the
+/// per-index bridge, no IPAM (carbide assigns the deterministic /127 itself).
+pub fn build_service_vpc_nad(
+    attachment_id: &str,
+    dpu_machine_id: &str,
+    service_vpc_index: u32,
+    namespace: &str,
+) -> DPUServiceNAD {
+    DPUServiceNAD {
+        metadata: ObjectMeta {
+            name: Some(service_vpc_cr_name(attachment_id, dpu_machine_id)),
+            namespace: Some(namespace.to_string()),
+            labels: Some(service_vpc_labels(attachment_id, dpu_machine_id)),
+            ..Default::default()
+        },
+        spec: DpuServiceNadSpec {
+            bridge: Some(service_vpc_bridge_name(service_vpc_index)),
+            chained_cn_is: None,
+            ipam: Some(false),
+            dpu_cluster_selector: None,
+            resource_type: DpuServiceNadResourceType::Sf,
+            service_mtu: None,
+        },
+        status: None,
+    }
+}
+
+/// Service-type DPUServiceInterface plumbing the attachment's NAD into the
+/// extension service identified by `service_id`, pinned to one DPU via the
+/// machine-id node label.
+pub fn build_service_vpc_interface(
+    attachment_id: &str,
+    service_id: &str,
+    service_vpc_index: u32,
+    dpu_machine_id: &str,
+    namespace: &str,
+) -> DPUServiceInterface {
+    let name = service_vpc_cr_name(attachment_id, dpu_machine_id);
+    let mut cr = DPUServiceInterface::new(
+        &name,
+        DpuServiceInterfaceSpec {
+            cluster_selector: None,
+            template: DpuServiceInterfaceTemplate {
+                metadata: None,
+                spec: DpuServiceInterfaceTemplateSpec {
+                    node_selector: Some(DpuServiceInterfaceTemplateSpecNodeSelector {
+                        match_expressions: None,
+                        match_labels: Some(service_vpc_node_selector(dpu_machine_id)),
+                    }),
+                    template: DpuServiceInterfaceTemplateSpecTemplate {
+                        metadata: Some(DpuServiceInterfaceTemplateSpecTemplateMetadata {
+                            annotations: None,
+                            // The chain's port selector matches this label.
+                            labels: Some(BTreeMap::from([("interface".to_string(), name.clone())])),
+                        }),
+                        spec: DpuServiceInterfaceTemplateSpecTemplateSpec {
+                            interface_type:
+                                DpuServiceInterfaceTemplateSpecTemplateSpecInterfaceType::Service,
+                            node: None,
+                            ovn: None,
+                            pf: None,
+                            physical: None,
+                            service: Some(DpuServiceInterfaceTemplateSpecTemplateSpecService {
+                                interface_name: service_vpc_interface_name(service_vpc_index),
+                                network: format!("{namespace}/{name}"),
+                                service_id: service_id.to_string(),
+                                virtual_network: None,
+                            }),
+                            vf: None,
+                            vlan: None,
+                            patch: None,
+                        },
+                    },
+                },
+            },
+            dpu_cluster_selector: None,
+        },
+    );
+    cr.metadata = ObjectMeta {
+        name: Some(name),
+        namespace: Some(namespace.to_string()),
+        labels: Some(service_vpc_labels(attachment_id, dpu_machine_id)),
+        ..Default::default()
+    };
+    cr
+}
+
+/// Single-switch DPUServiceChain wiring the attachment's interface onto its
+/// bridge on one DPU (ports select the interface's template label).
+pub fn build_service_vpc_chain(
+    attachment_id: &str,
+    dpu_machine_id: &str,
+    namespace: &str,
+) -> DPUServiceChain {
+    let name = service_vpc_cr_name(attachment_id, dpu_machine_id);
+    DPUServiceChain {
+        metadata: ObjectMeta {
+            name: Some(name.clone()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(service_vpc_labels(attachment_id, dpu_machine_id)),
+            ..Default::default()
+        },
+        spec: DpuServiceChainSpec {
+            cluster_selector: None,
+            dpu_cluster_selector: None,
+            template: DpuServiceChainTemplate {
+                metadata: None,
+                spec: DpuServiceChainTemplateSpec {
+                    node_selector: Some(DpuServiceChainTemplateSpecNodeSelector {
+                        match_expressions: None,
+                        match_labels: Some(service_vpc_node_selector(dpu_machine_id)),
+                    }),
+                    template: DpuServiceChainTemplateSpecTemplate {
+                        metadata: None,
+                        spec: DpuServiceChainTemplateSpecTemplateSpec {
+                            node: None,
+                            switches: vec![DpuServiceChainTemplateSpecTemplateSpecSwitches {
+                                ports: vec![DpuServiceChainTemplateSpecTemplateSpecSwitchesPorts {
+                                    service_interface:
+                                        DpuServiceChainTemplateSpecTemplateSpecSwitchesPortsServiceInterface {
+                                            ipam: None,
+                                            match_labels: BTreeMap::from([(
+                                                "interface".to_string(),
+                                                name,
+                                            )]),
+                                        },
+                                }],
+                                service_mtu: None,
+                            }],
+                        },
+                    },
+                },
+            },
+        },
+        status: None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1962,6 +2173,150 @@ fn detached_node_selector(
             ),
             match_fields: None,
         }],
+    }
+}
+
+/// True when the conditions report `Ready: True`.
+fn conditions_ready(
+    conditions: Option<&[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition]>,
+) -> bool {
+    conditions.is_some_and(|conditions| {
+        conditions
+            .iter()
+            .any(|c| c.type_ == "Ready" && c.status == "True")
+    })
+}
+
+impl<R, L: ResourceLabeler> DpfSdk<R, L>
+where
+    R: DpuDeviceRepository
+        + DpuServiceNADRepository
+        + crate::repository::DpuServiceInterfaceRepository
+        + crate::repository::DpuServiceChainRepository,
+{
+    /// Idempotently establishes one service-VPC attachment on one DPU:
+    /// stamps the machine-id label onto the DPU-cluster node (so the CRs'
+    /// node selectors resolve to exactly that DPU), then server-side-applies
+    /// the NAD, DPUServiceInterface, and DPUServiceChain.
+    pub async fn ensure_service_vpc_attachment(
+        &self,
+        req: &ServiceVpcAttachmentRequest,
+    ) -> Result<(), DpfError> {
+        self.merge_dpu_device_node_labels(
+            &req.dpu_device_id,
+            BTreeMap::from([(
+                DPU_MACHINE_ID_NODE_LABEL.to_string(),
+                Some(req.dpu_machine_id.clone()),
+            )]),
+        )
+        .await?;
+        DpuServiceNADRepository::apply(
+            &*self.repo,
+            &build_service_vpc_nad(
+                &req.attachment_id,
+                &req.dpu_machine_id,
+                req.service_vpc_index,
+                &self.namespace,
+            ),
+        )
+        .await?;
+        crate::repository::DpuServiceInterfaceRepository::apply(
+            &*self.repo,
+            &build_service_vpc_interface(
+                &req.attachment_id,
+                &req.service_id,
+                req.service_vpc_index,
+                &req.dpu_machine_id,
+                &self.namespace,
+            ),
+        )
+        .await?;
+        crate::repository::DpuServiceChainRepository::apply(
+            &*self.repo,
+            &build_service_vpc_chain(&req.attachment_id, &req.dpu_machine_id, &self.namespace),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Deletes every service-VPC CR of one attachment, across all of its
+    /// DPUs. Chains go first so DPF never reconciles a chain whose interface
+    /// is already gone; deleting an absent CR is not an error, so the call is
+    /// safe to retry.
+    pub async fn remove_service_vpc_attachments(
+        &self,
+        attachment_id: &str,
+    ) -> Result<(), DpfError> {
+        let selector = service_vpc_attachment_selector(attachment_id);
+        for chain in crate::repository::DpuServiceChainRepository::list_by_labels(
+            &*self.repo,
+            &self.namespace,
+            &selector,
+        )
+        .await?
+        {
+            if let Some(name) = chain.metadata.name.as_deref() {
+                crate::repository::DpuServiceChainRepository::delete(
+                    &*self.repo,
+                    name,
+                    &self.namespace,
+                )
+                .await?;
+            }
+        }
+        for iface in crate::repository::DpuServiceInterfaceRepository::list_by_labels(
+            &*self.repo,
+            &self.namespace,
+            &selector,
+        )
+        .await?
+        {
+            if let Some(name) = iface.metadata.name.as_deref() {
+                crate::repository::DpuServiceInterfaceRepository::delete(
+                    &*self.repo,
+                    name,
+                    &self.namespace,
+                )
+                .await?;
+            }
+        }
+        for nad in
+            DpuServiceNADRepository::list_by_labels(&*self.repo, &self.namespace, &selector).await?
+        {
+            if let Some(name) = nad.metadata.name.as_deref() {
+                DpuServiceNADRepository::delete(&*self.repo, name, &self.namespace).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Best-effort readiness probe for one (attachment, DPU) pair: true when
+    /// both the DPUServiceInterface and the DPUServiceChain exist and report a
+    /// `Ready: True` condition. A missing CR or absent status is "not ready",
+    /// not an error.
+    pub async fn service_vpc_attachment_ready(
+        &self,
+        attachment_id: &str,
+        dpu_machine_id: &str,
+    ) -> Result<bool, DpfError> {
+        let name = service_vpc_cr_name(attachment_id, dpu_machine_id);
+        let iface_ready = crate::repository::DpuServiceInterfaceRepository::get(
+            &*self.repo,
+            &name,
+            &self.namespace,
+        )
+        .await?
+        .and_then(|iface| iface.status)
+        .is_some_and(|status| conditions_ready(status.conditions.as_deref()));
+        if !iface_ready {
+            return Ok(false);
+        }
+        Ok(
+            crate::repository::DpuServiceChainRepository::get(&*self.repo, &name, &self.namespace)
+                .await?
+                .and_then(|chain| chain.status)
+                .is_some_and(|status| conditions_ready(status.conditions.as_deref())),
+        )
     }
 }
 
@@ -5688,5 +6043,110 @@ mod extra_script_configmap_tests {
                 "the existing ConfigMap is left byte-for-byte alone"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod service_vpc_builder_tests {
+    use super::*;
+
+    const ATTACHMENT_ID: &str = "0192e6c1-9c7b-7d10-8a2f-3b4c5d6e7f80";
+    const DPU_MACHINE_ID: &str = "fm1000dpu00000000000000000000000000000000000000000000000abcd";
+    const NS: &str = "dpf-operator-system";
+
+    #[test]
+    fn cr_name_is_deterministic_and_label_safe() {
+        let name = service_vpc_cr_name(ATTACHMENT_ID, DPU_MACHINE_ID);
+        assert_eq!(name, service_vpc_cr_name(ATTACHMENT_ID, DPU_MACHINE_ID));
+        assert!(name.len() <= 63, "must fit a Kubernetes name: {name}");
+        assert!(name.starts_with("sv-"));
+        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        // Different DPUs on the same attachment get distinct CRs.
+        assert_ne!(name, service_vpc_cr_name(ATTACHMENT_ID, "fm1000dpuother"));
+    }
+
+    #[test]
+    fn attachment_selector_matches_builder_labels() {
+        let nad = build_service_vpc_nad(ATTACHMENT_ID, DPU_MACHINE_ID, 3, NS);
+        let labels = nad.metadata.labels.as_ref().unwrap();
+        for pair in service_vpc_attachment_selector(ATTACHMENT_ID).split(',') {
+            let (k, v) = pair.split_once('=').unwrap();
+            assert_eq!(
+                labels.get(k).map(String::as_str),
+                Some(v),
+                "selector key {k}"
+            );
+        }
+        assert_eq!(
+            labels.get(DPU_MACHINE_ID_NODE_LABEL).map(String::as_str),
+            Some(DPU_MACHINE_ID)
+        );
+    }
+
+    #[test]
+    fn nad_uses_index_bridge_sf_and_no_ipam() {
+        let nad = build_service_vpc_nad(ATTACHMENT_ID, DPU_MACHINE_ID, 7, NS);
+        assert_eq!(nad.spec.bridge.as_deref(), Some("br-vpc7"));
+        assert!(matches!(
+            nad.spec.resource_type,
+            DpuServiceNadResourceType::Sf
+        ));
+        assert_eq!(nad.spec.ipam, Some(false));
+        assert_eq!(nad.spec.service_mtu, None);
+        assert_eq!(nad.metadata.namespace.as_deref(), Some(NS));
+    }
+
+    #[test]
+    fn interface_is_service_typed_and_pinned_to_the_dpu() {
+        let iface =
+            build_service_vpc_interface(ATTACHMENT_ID, "block-storage", 7, DPU_MACHINE_ID, NS);
+        let name = service_vpc_cr_name(ATTACHMENT_ID, DPU_MACHINE_ID);
+        assert_eq!(iface.metadata.name.as_deref(), Some(name.as_str()));
+
+        let tmpl = &iface.spec.template;
+        let node_selector = tmpl.spec.node_selector.as_ref().unwrap();
+        assert_eq!(
+            node_selector.match_labels.as_ref().unwrap()[DPU_MACHINE_ID_NODE_LABEL],
+            DPU_MACHINE_ID
+        );
+
+        let inner = &tmpl.spec.template;
+        assert_eq!(
+            inner.metadata.as_ref().unwrap().labels.as_ref().unwrap()["interface"],
+            name
+        );
+        assert!(matches!(
+            inner.spec.interface_type,
+            DpuServiceInterfaceTemplateSpecTemplateSpecInterfaceType::Service
+        ));
+        let service = inner.spec.service.as_ref().unwrap();
+        assert_eq!(service.interface_name, "vpc7");
+        assert_eq!(service.network, format!("{NS}/{name}"));
+        assert_eq!(service.service_id, "block-storage");
+        assert_eq!(service.virtual_network, None);
+    }
+
+    #[test]
+    fn chain_port_selects_the_interface_template_label() {
+        let chain = build_service_vpc_chain(ATTACHMENT_ID, DPU_MACHINE_ID, NS);
+        let name = service_vpc_cr_name(ATTACHMENT_ID, DPU_MACHINE_ID);
+
+        let tmpl = &chain.spec.template.spec;
+        assert_eq!(
+            tmpl.node_selector
+                .as_ref()
+                .unwrap()
+                .match_labels
+                .as_ref()
+                .unwrap()[DPU_MACHINE_ID_NODE_LABEL],
+            DPU_MACHINE_ID
+        );
+
+        let switches = &tmpl.template.spec.switches;
+        assert_eq!(switches.len(), 1);
+        assert_eq!(switches[0].ports.len(), 1);
+        let port_selector = &switches[0].ports[0].service_interface;
+        assert_eq!(port_selector.match_labels["interface"], name);
+        assert!(port_selector.ipam.is_none());
     }
 }

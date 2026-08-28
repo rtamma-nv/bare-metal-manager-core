@@ -229,7 +229,15 @@ pub trait DpuServiceRepository: Send + Sync {
 pub trait DpuServiceNADRepository: Send + Sync {
     async fn get(&self, name: &str, namespace: &str) -> Result<Option<DPUServiceNAD>, DpfError>;
     async fn list(&self, namespace: &str) -> Result<Vec<DPUServiceNAD>, DpfError>;
+    /// Lists NADs matching a Kubernetes label selector (e.g. `"k=v"`).
+    async fn list_by_labels(
+        &self,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Vec<DPUServiceNAD>, DpfError>;
     async fn apply(&self, nad: &DPUServiceNAD) -> Result<DPUServiceNAD, DpfError>;
+    /// Deletes a NAD; deleting a NAD that does not exist is not an error.
+    async fn delete(&self, name: &str, namespace: &str) -> Result<(), DpfError>;
 }
 
 /// Repository for DPUServiceChain resources.
@@ -237,6 +245,15 @@ pub trait DpuServiceNADRepository: Send + Sync {
 pub trait DpuServiceChainRepository: Send + Sync {
     async fn get(&self, name: &str, namespace: &str) -> Result<Option<DPUServiceChain>, DpfError>;
     async fn list(&self, namespace: &str) -> Result<Vec<DPUServiceChain>, DpfError>;
+    /// Lists chains matching a Kubernetes label selector (e.g. `"k=v"`).
+    async fn list_by_labels(
+        &self,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Vec<DPUServiceChain>, DpfError>;
+    async fn apply(&self, chain: &DPUServiceChain) -> Result<DPUServiceChain, DpfError>;
+    /// Deletes a chain; deleting a chain that does not exist is not an error.
+    async fn delete(&self, name: &str, namespace: &str) -> Result<(), DpfError>;
 }
 
 /// Repository for DPUServiceInterface resources.
@@ -248,7 +265,15 @@ pub trait DpuServiceInterfaceRepository: Send + Sync {
         namespace: &str,
     ) -> Result<Option<DPUServiceInterface>, DpfError>;
     async fn list(&self, namespace: &str) -> Result<Vec<DPUServiceInterface>, DpfError>;
+    /// Lists interfaces matching a Kubernetes label selector (e.g. `"k=v"`).
+    async fn list_by_labels(
+        &self,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Vec<DPUServiceInterface>, DpfError>;
     async fn apply(&self, iface: &DPUServiceInterface) -> Result<DPUServiceInterface, DpfError>;
+    /// Deletes an interface; deleting one that does not exist is not an error.
+    async fn delete(&self, name: &str, namespace: &str) -> Result<(), DpfError>;
 }
 
 /// Repository for Kubernetes ConfigMaps and Secrets.

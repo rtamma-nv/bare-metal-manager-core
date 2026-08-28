@@ -110,17 +110,23 @@ pub async fn delete_by_instance(
 }
 
 /// Removes every endpoint of one extension service (registration deletion).
+/// Returns the distinct attachment ids of the removed rows so the caller can
+/// best-effort remove their DPF CRs.
 pub async fn delete_by_extension_service(
     txn: &mut PgConnection,
     extension_service_id: ExtensionServiceId,
-) -> Result<u64, DatabaseError> {
-    let query = "DELETE FROM service_vpc_endpoints WHERE extension_service_id = $1";
-    let result = sqlx::query(query)
+) -> Result<Vec<AttachmentId>, DatabaseError> {
+    let query = "DELETE FROM service_vpc_endpoints WHERE extension_service_id = $1
+                 RETURNING attachment_id";
+    let rows: Vec<(AttachmentId,)> = sqlx::query_as(query)
         .bind(extension_service_id)
-        .execute(&mut *txn)
+        .fetch_all(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    Ok(result.rows_affected())
+    let mut attachment_ids: Vec<AttachmentId> = rows.into_iter().map(|(id,)| id).collect();
+    attachment_ids.sort_unstable();
+    attachment_ids.dedup();
+    Ok(attachment_ids)
 }
 
 /// Returns the endpoints of one (instance, extension service) binding,

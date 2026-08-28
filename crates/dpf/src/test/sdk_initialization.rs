@@ -353,6 +353,16 @@ impl DpuServiceConfigurationRepository for InitializationMock {
     }
 }
 
+/// Matches a comma-separated `k=v` label selector against resource labels
+/// (the only selector form the SDK issues).
+fn selector_matches(labels: Option<&BTreeMap<String, String>>, selector: &str) -> bool {
+    selector.split(',').all(|pair| {
+        pair.split_once('=').is_some_and(|(k, v)| {
+            labels.is_some_and(|labels| labels.get(k).map(String::as_str) == Some(v))
+        })
+    })
+}
+
 #[async_trait]
 impl DpuServiceNADRepository for InitializationMock {
     async fn get(&self, name: &str, ns: &str) -> Result<Option<DPUServiceNAD>, DpfError> {
@@ -367,9 +377,27 @@ impl DpuServiceNADRepository for InitializationMock {
             .map(|entry| entry.value().clone())
             .collect())
     }
+    async fn list_by_labels(
+        &self,
+        ns: &str,
+        selector: &str,
+    ) -> Result<Vec<DPUServiceNAD>, DpfError> {
+        let prefix = format!("{}/", ns);
+        Ok(self
+            .nads
+            .iter()
+            .filter(|entry| entry.key().starts_with(&prefix))
+            .filter(|entry| selector_matches(entry.value().meta().labels.as_ref(), selector))
+            .map(|entry| entry.value().clone())
+            .collect())
+    }
     async fn apply(&self, nad: &DPUServiceNAD) -> Result<DPUServiceNAD, DpfError> {
         self.nads.insert(resource_key(nad), nad.clone());
         Ok(nad.clone())
+    }
+    async fn delete(&self, name: &str, ns: &str) -> Result<(), DpfError> {
+        self.nads.remove(&ns_key(ns, name));
+        Ok(())
     }
 }
 
@@ -390,10 +418,28 @@ impl DpuServiceInterfaceRepository for InitializationMock {
             .map(|entry| entry.value().clone())
             .collect())
     }
+    async fn list_by_labels(
+        &self,
+        ns: &str,
+        selector: &str,
+    ) -> Result<Vec<DPUServiceInterface>, DpfError> {
+        let prefix = format!("{}/", ns);
+        Ok(self
+            .service_interfaces
+            .iter()
+            .filter(|entry| entry.key().starts_with(&prefix))
+            .filter(|entry| selector_matches(entry.value().meta().labels.as_ref(), selector))
+            .map(|entry| entry.value().clone())
+            .collect())
+    }
     async fn apply(&self, iface: &DPUServiceInterface) -> Result<DPUServiceInterface, DpfError> {
         self.service_interfaces
             .insert(resource_key(iface), iface.clone());
         Ok(iface.clone())
+    }
+    async fn delete(&self, name: &str, ns: &str) -> Result<(), DpfError> {
+        self.service_interfaces.remove(&ns_key(ns, name));
+        Ok(())
     }
 }
 

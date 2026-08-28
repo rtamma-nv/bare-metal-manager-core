@@ -646,6 +646,20 @@ async fn get_managed_host_network_config_inner(
         Vec::new()
     };
 
+    // Service-VPC network config for the requesting DPU (block-storage design
+    // section 6.4): resolved while the transaction is open because it reads
+    // service VPCs and their NSGs.
+    let service_interfaces = if let Some(instance) = snapshot.instance.as_ref() {
+        build_service_interfaces(
+            &mut txn,
+            &instance.config.extension_services.service_configs,
+            &dpu_machine_id,
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
+
     // Next, get credentials for each extension service from vault. This should be done after the
     // transaction is committed.
     txn.commit().await?;
@@ -792,6 +806,7 @@ async fn get_managed_host_network_config_inner(
             .unwrap_or_default(),
         instance: maybe_instance,
         dpu_extension_services: extension_services,
+        service_interfaces,
         bgp_leaf_session_password: match api.runtime_config.bgp_leaf_session_password.as_ref() {
             Some(p) => match p {
                 cfg::file::BgpLeafSessionPassword::SiteWide => Some(
@@ -814,6 +829,130 @@ async fn get_managed_host_network_config_inner(
     tracing::Span::current().record("logfmt.suppress", true);
 
     Ok(resp)
+}
+
+/// Builds the service-VPC network config entries for the requesting DPU: one
+/// per active extension-service binding with an endpoint on this DPU
+/// (block-storage design section 6.4).
+///
+/// Only the service VPC's NSG applies on the service path — deliberately no
+/// fallback to the instance's own NSG (design section 6.3); an absent
+/// service-VPC NSG means no NSG.
+async fn build_service_interfaces(
+    txn: &mut sqlx::PgConnection,
+    service_configs: &[model::instance::config::extension_services::InstanceExtensionServiceConfig],
+    dpu_machine_id: &MachineId,
+) -> Result<Vec<rpc::ManagedHostServiceInterfaceConfig>, CarbideError> {
+    let bound: Vec<_> = service_configs
+        .iter()
+        .filter(|c| c.removed.is_none())
+        .filter_map(|c| {
+            let attachment_id = c.attachment_id?;
+            let service_vpc_id = c.service_vpc_id?;
+            let service_vpc_index = c.service_vpc_index?;
+            let endpoint = c.endpoints.iter().find(|e| &e.dpu_id == dpu_machine_id)?;
+            Some((
+                c.service_id,
+                attachment_id,
+                service_vpc_id,
+                service_vpc_index,
+                endpoint,
+            ))
+        })
+        .collect();
+    if bound.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let vpc_ids: Vec<carbide_uuid::vpc::VpcId> = bound
+        .iter()
+        .map(|(_, _, vpc_id, _, _)| *vpc_id)
+        .unique()
+        .collect();
+    let vpcs_by_id: HashMap<_, _> = db::vpc::find_by(
+        &mut *txn,
+        db::ObjectColumnFilter::List(db::vpc::IdColumn, &vpc_ids),
+    )
+    .await?
+    .into_iter()
+    .map(|v| (v.id, v))
+    .collect();
+
+    let nsg_ids: Vec<_> = vpcs_by_id
+        .values()
+        .filter_map(|v| v.config.network_security_group_id.clone())
+        .unique()
+        .collect();
+    let nsgs_by_id: HashMap<_, _> = if nsg_ids.is_empty() {
+        HashMap::new()
+    } else {
+        db::network_security_group::find_by_ids(&mut *txn, &nsg_ids, None, false)
+            .await?
+            .into_iter()
+            .map(|n| (n.id.clone(), n))
+            .collect()
+    };
+
+    let mut out = Vec::with_capacity(bound.len());
+    for (service_id, attachment_id, service_vpc_id, service_vpc_index, endpoint) in bound {
+        // A missing service VPC is an invariant violation (VPC deletion is
+        // blocked while a registration references it), but it must not take
+        // down the DPU's entire network config — this response also carries
+        // the admin and tenant interfaces. Omit the broken service's
+        // interface and keep the rest of the response intact; the omission
+        // also withholds the config version ack for the service, so the gap
+        // stays visible instead of reading as converged.
+        let Some(vpc) = vpcs_by_id.get(&service_vpc_id) else {
+            tracing::warn!(
+                %service_id,
+                %attachment_id,
+                %service_vpc_id,
+                "service VPC missing for a bound extension service; omitting \
+                 its service interface from the DPU network config"
+            );
+            continue;
+        };
+        let network_security_group = match vpc.config.network_security_group_id.as_ref() {
+            None => None,
+            Some(nsg_id) => {
+                // Fail closed: delivering the interface without its NSG would
+                // silently drop the service VPC's policy.
+                let Some(nsg) = nsgs_by_id.get(nsg_id) else {
+                    tracing::warn!(
+                        %service_id,
+                        %attachment_id,
+                        %service_vpc_id,
+                        network_security_group_id = %nsg_id,
+                        "service VPC's network security group missing; omitting \
+                         the service interface from the DPU network config"
+                    );
+                    continue;
+                };
+                let nsg = nsg.clone();
+                Some(rpc::FlatInterfaceNetworkSecurityGroupConfig {
+                    id: nsg.id.to_string(),
+                    version: nsg.version.to_string(),
+                    source: i32::from(rpc::NetworkSecurityGroupSource::NsgSourceVpc),
+                    stateful_egress: nsg.stateful_egress,
+                    rules: nsg
+                        .rules
+                        .into_iter()
+                        .map(crate::ethernet_virtualization::resolve_security_group_rule)
+                        .collect::<Result<Vec<_>, CarbideError>>()?,
+                })
+            }
+        };
+
+        out.push(rpc::ManagedHostServiceInterfaceConfig {
+            attachment_id: attachment_id.to_string(),
+            service_id: service_id.to_string(),
+            service_vpc_index,
+            link_prefix: endpoint.link_prefix.to_string(),
+            network_security_group,
+            mtu: None,
+        });
+    }
+    Ok(out)
 }
 
 pub(crate) async fn get_managed_host_network_config(

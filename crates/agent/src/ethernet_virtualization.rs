@@ -2971,6 +2971,7 @@ mod tests {
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            service_interfaces: vec![],
         }
     }
 
@@ -3465,6 +3466,7 @@ mod tests {
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            service_interfaces: vec![],
         };
 
         let f = tempfile::NamedTempFile::new()?;
@@ -3654,6 +3656,7 @@ mod tests {
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            service_interfaces: vec![],
         };
 
         let f = tempfile::NamedTempFile::new()?;

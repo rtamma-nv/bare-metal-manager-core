@@ -19,6 +19,7 @@ mod dpu_service_sync;
 mod dpu_service_sync_release;
 mod happy_path;
 mod reprovisioning;
+mod service_vpc;
 mod stale_labels;
 mod waiting_for_ready;
 

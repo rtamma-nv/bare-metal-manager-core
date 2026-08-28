@@ -1408,6 +1408,7 @@ pub(crate) async fn update_instance_config(
         &instance,
         &mut config.extension_services,
         api.runtime_config.max_service_vpcs_per_tenant,
+        api.runtime_config.site_global_vpc_vni,
         &mut txn,
     )
     .await?;
@@ -1784,6 +1785,7 @@ async fn update_instance_extension_services_config(
     instance: &InstanceSnapshot,
     extension_services: &mut InstanceExtensionServicesConfig,
     max_service_vpcs_per_tenant: u32,
+    site_global_vpc_vni: Option<u32>,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), CarbideError> {
     if !instance
@@ -1819,32 +1821,6 @@ async fn update_instance_extension_services_config(
         )));
     }
 
-    // Carry forward system-assigned bindings for services that are already
-    // active, so complete-replace updates that omit them do not re-derive
-    // endpoints under a fresh attachment id (leaking the old reservations).
-    for service in extension_services
-        .service_configs
-        .iter_mut()
-        .filter(|s| s.removed.is_none() && s.attachment_id.is_none())
-    {
-        if let Some(current) = instance
-            .config
-            .extension_services
-            .service_configs
-            .iter()
-            .find(|c| {
-                c.removed.is_none()
-                    && c.service_id == service.service_id
-                    && c.version == service.version
-            })
-        {
-            service.service_vpc_id = current.service_vpc_id;
-            service.service_vpc_index = current.service_vpc_index;
-            service.attachment_id = current.attachment_id;
-            service.endpoints = current.endpoints.clone();
-        }
-    }
-
     // Derive service-VPC bindings and assign each bound service its stable
     // per-(tenant, service VPC) index and endpoint /127s. An empty DPU list
     // is rejected inside assign_service_vpc_bindings, and only when a new
@@ -1858,6 +1834,7 @@ async fn update_instance_extension_services_config(
         instance.id,
         &dpu_ids,
         max_service_vpcs_per_tenant,
+        site_global_vpc_vni,
         txn.as_mut(),
     )
     .await?;
@@ -1868,28 +1845,9 @@ async fn update_instance_extension_services_config(
         .extension_services
         .calculate_new_extension_services_config(extension_services);
 
-    // Newly terminated bindings release their endpoint /127 reservations.
-    // TODO(blockstorage): defer this to DPF cleanup acknowledgement once DPU
-    // config delivery exists (increment 3).
-    for service in new_extension_services_config
-        .service_configs
-        .iter()
-        .filter(|s| s.removed.is_some())
-    {
-        let was_active = instance
-            .config
-            .extension_services
-            .service_configs
-            .iter()
-            .any(|c| {
-                c.removed.is_none()
-                    && c.service_id == service.service_id
-                    && c.version == service.version
-            });
-        if was_active && let Some(attachment_id) = service.attachment_id {
-            db::service_vpc_endpoint::delete_by_attachment(txn.as_mut(), attachment_id).await?;
-        }
-    }
+    // Newly terminated bindings keep their endpoint /127 reservations until
+    // every DPU acknowledges termination; the machine controller's gated
+    // cleanup removes the DPF CRs and releases the endpoints then.
 
     // Persist the extension services config.
     db::instance::update_extension_services_config(
@@ -1940,8 +1898,8 @@ pub(super) async fn force_delete_instance(
     // TODO: This might need some changes with the new state machine
     let mut txn = api.txn_begin().await?;
     db::instance::delete(instance_id, &mut txn).await?;
-    // The instance's service-VPC endpoint /127 reservations die with it.
-    // TODO(blockstorage): defer to DPF cleanup acknowledgement (increment 3).
+    // Force-delete is an immediate path: the endpoint /127 reservations die
+    // with the instance rather than waiting for DPU acknowledgement.
     db::service_vpc_endpoint::delete_by_instance(txn.as_mut(), instance_id).await?;
 
     let mut network_segment_ids_with_vpc = vec![];
@@ -2000,6 +1958,25 @@ pub(super) async fn force_delete_instance(
     .map_err(|e| CarbideError::internal(e.to_string()))?;
 
     txn.commit().await?;
+
+    // Best-effort removal of the instance's DPF service-VPC CRs. The rows are
+    // already gone; the ownership labels let a later sweep collect anything
+    // missed here.
+    if let Some(dpf_sdk) = api.dpf_sdk.as_ref() {
+        for service in &instance.config.extension_services.service_configs {
+            if let Some(attachment_id) = service.attachment_id
+                && let Err(error) = dpf_sdk
+                    .remove_service_vpc_attachments(&attachment_id.to_string())
+                    .await
+            {
+                tracing::warn!(
+                    %attachment_id,
+                    %error,
+                    "Failed to remove service-VPC CRs during instance force-delete"
+                );
+            }
+        }
+    }
 
     Ok(())
 }

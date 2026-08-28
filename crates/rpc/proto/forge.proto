@@ -4940,6 +4940,30 @@ message ManagedHostNetworkConfigResponse {
   // restart openvswitch-switch if this is set. Other actions could also
   // be added based on this tracking variable.
   optional bool use_admin_network_changed = 120;
+
+  // Service-VPC network config for extension services bound to a service VPC
+  // (DPU block-storage design): one entry per bound service with an endpoint
+  // on the requesting DPU.
+  repeated ManagedHostServiceInterfaceConfig service_interfaces = 121;
+}
+
+// Per-(attachment, DPU) service-VPC network config delivered to the DPU agent.
+// The agent selects the pre-created SF by service_vpc_index, places it into
+// the service VPC's shadow VRF, and assigns the link prefix's ::0 (HBN side);
+// the service pod takes ::1.
+message ManagedHostServiceInterfaceConfig {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  string attachment_id = 1;
+  string service_id = 2;
+  // Per-(tenant, service VPC) index selecting the pre-created SF / shadow VRF.
+  uint32 service_vpc_index = 3;
+  // This DPU's /127 endpoint inside the service VPC's derived ULA /48.
+  string link_prefix = 4;
+  // The service VPC's NSG. Only this NSG applies on the service path; there
+  // is deliberately no fallback to the instance's own NSG.
+  optional FlatInterfaceNetworkSecurityGroupConfig network_security_group = 5;
+  // Omitted for now: DPF/agent defaults apply.
+  optional uint32 mtu = 6;
 }
 
 message ManagedHostDpuExtensionServiceConfig {

@@ -497,6 +497,16 @@ impl DpuServiceNADRepository for KubeRepository {
         Ok(list.items)
     }
 
+    async fn list_by_labels(
+        &self,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Vec<DPUServiceNAD>, DpfError> {
+        let api: Api<DPUServiceNAD> = self.api(namespace);
+        let list = api.list(&ListParams::default().labels(selector)).await?;
+        Ok(list.items)
+    }
+
     async fn apply(&self, nad: &DPUServiceNAD) -> Result<DPUServiceNAD, DpfError> {
         let namespace = nad.meta().namespace.as_deref().unwrap_or("default");
         let name = nad.meta().name.as_deref().unwrap_or("default");
@@ -508,6 +518,15 @@ impl DpuServiceNADRepository for KubeRepository {
                 &Patch::Apply(nad),
             )
             .await?)
+    }
+
+    async fn delete(&self, name: &str, namespace: &str) -> Result<(), DpfError> {
+        let api: Api<DPUServiceNAD> = self.api(namespace);
+        match api.delete(name, &Default::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 404 => Ok(()),
+            Err(err) => Err(err.into()),
+        }
     }
 }
 
@@ -561,6 +580,38 @@ impl DpuServiceChainRepository for KubeRepository {
         let list = api.list(&ListParams::default()).await?;
         Ok(list.items)
     }
+
+    async fn list_by_labels(
+        &self,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Vec<DPUServiceChain>, DpfError> {
+        let api: Api<DPUServiceChain> = self.api(namespace);
+        let list = api.list(&ListParams::default().labels(selector)).await?;
+        Ok(list.items)
+    }
+
+    async fn apply(&self, chain: &DPUServiceChain) -> Result<DPUServiceChain, DpfError> {
+        let namespace = chain.meta().namespace.as_deref().unwrap_or("default");
+        let name = chain.meta().name.as_deref().unwrap_or("default");
+        let api = self.api(namespace);
+        Ok(api
+            .patch(
+                name,
+                &PatchParams::apply("carbide-dpf-sdk").force(),
+                &Patch::Apply(chain),
+            )
+            .await?)
+    }
+
+    async fn delete(&self, name: &str, namespace: &str) -> Result<(), DpfError> {
+        let api: Api<DPUServiceChain> = self.api(namespace);
+        match api.delete(name, &Default::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 404 => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
 }
 
 #[async_trait]
@@ -580,6 +631,16 @@ impl DpuServiceInterfaceRepository for KubeRepository {
         Ok(list.items)
     }
 
+    async fn list_by_labels(
+        &self,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Vec<DPUServiceInterface>, DpfError> {
+        let api: Api<DPUServiceInterface> = self.api(namespace);
+        let list = api.list(&ListParams::default().labels(selector)).await?;
+        Ok(list.items)
+    }
+
     async fn apply(&self, iface: &DPUServiceInterface) -> Result<DPUServiceInterface, DpfError> {
         let namespace = iface.meta().namespace.as_deref().unwrap_or("default");
         let name = iface.meta().name.as_deref().unwrap_or("default");
@@ -591,6 +652,15 @@ impl DpuServiceInterfaceRepository for KubeRepository {
                 &Patch::Apply(iface),
             )
             .await?)
+    }
+
+    async fn delete(&self, name: &str, namespace: &str) -> Result<(), DpfError> {
+        let api: Api<DPUServiceInterface> = self.api(namespace);
+        match api.delete(name, &Default::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(err)) if err.code == 404 => Ok(()),
+            Err(err) => Err(err.into()),
+        }
     }
 }
 

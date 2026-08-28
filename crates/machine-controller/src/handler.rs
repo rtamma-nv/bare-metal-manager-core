@@ -7949,6 +7949,12 @@ impl StateHandler for InstanceStateHandler {
                         return Ok(StateHandlerOutcome::transition(next_state));
                     }
 
+                    // Reconcile the DPF service-VPC CRs for bound services
+                    // before evaluating readiness. Level-triggered and
+                    // server-side-applied, so repeats converge without churn.
+                    ensure_service_vpc_attachments(mh_snapshot, instance, self.dpf_sdk.as_deref())
+                        .await?;
+
                     let mut extension_services_status =
                         get_extension_services_status(mh_snapshot, instance);
                     let txn = if extension_services_status.configs_synced == SyncState::Synced
@@ -7961,6 +7967,7 @@ impl StateHandler for InstanceStateHandler {
                             instance,
                             &mut extension_services_status,
                             txn.as_mut(),
+                            self.dpf_sdk.as_deref(),
                         )
                         .await?;
 
@@ -8085,6 +8092,7 @@ impl StateHandler for InstanceStateHandler {
                                 instance,
                                 &mut extension_services_status,
                                 txn.as_mut(),
+                                self.dpf_sdk.as_deref(),
                             )
                             .await?;
                             txn_opt = Some(txn);
@@ -8898,10 +8906,94 @@ fn get_extension_services_status(
     )
 }
 
+/// Reconciles the DPF service-VPC CRs (NAD, DPUServiceInterface,
+/// DPUServiceChain) for every active VPC-bound extension service on this
+/// instance: one CR triple per reserved (attachment, DPU) endpoint. CR
+/// readiness is probed and logged only — the agent's config-version
+/// acknowledgement remains the readiness gate.
+async fn ensure_service_vpc_attachments(
+    mh_snapshot: &ManagedHostStateSnapshot,
+    instance: &InstanceSnapshot,
+    dpf_sdk: Option<&dyn DpfOperations>,
+) -> Result<(), StateHandlerError> {
+    let Some(dpf) = dpf_sdk else {
+        return Ok(());
+    };
+    for service in instance
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .filter(|s| s.removed.is_none())
+    {
+        let (Some(attachment_id), Some(service_vpc_index)) =
+            (service.attachment_id, service.service_vpc_index)
+        else {
+            continue;
+        };
+        for endpoint in &service.endpoints {
+            let Some(dpu) = mh_snapshot
+                .dpu_snapshots
+                .iter()
+                .find(|d| d.id == endpoint.dpu_id)
+            else {
+                tracing::warn!(
+                    %attachment_id,
+                    dpu_machine_id = %endpoint.dpu_id,
+                    "Service-VPC endpoint references a DPU absent from the host snapshot; skipping"
+                );
+                continue;
+            };
+            let Some(dpu_device_id) = dpu.dpf_id() else {
+                tracing::warn!(
+                    %attachment_id,
+                    dpu_machine_id = %dpu.id,
+                    "DPU has no DPF id (BMC MAC unset); cannot place service-VPC CRs"
+                );
+                continue;
+            };
+            let request = carbide_dpf::ServiceVpcAttachmentRequest {
+                attachment_id: attachment_id.to_string(),
+                service_id: service.service_id.to_string(),
+                service_vpc_index,
+                dpu_machine_id: dpu.id.to_string(),
+                dpu_device_id,
+            };
+            dpf.ensure_service_vpc_attachment(&request)
+                .await
+                .map_err(|e| {
+                    StateHandlerError::GenericError(eyre!(
+                        "failed to ensure service-VPC CRs for attachment {attachment_id} on DPU {}: {e}",
+                        dpu.id
+                    ))
+                })?;
+            match dpf
+                .service_vpc_attachment_ready(&request.attachment_id, &request.dpu_machine_id)
+                .await
+            {
+                Ok(ready) => tracing::debug!(
+                    %attachment_id,
+                    dpu_machine_id = %dpu.id,
+                    ready,
+                    "Service-VPC attachment CR readiness"
+                ),
+                Err(error) => tracing::warn!(
+                    %attachment_id,
+                    dpu_machine_id = %dpu.id,
+                    %error,
+                    "Could not probe service-VPC attachment CR readiness"
+                ),
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn cleanup_terminated_extension_services(
     instance: &InstanceSnapshot,
     extension_services_status: &mut InstanceExtensionServicesStatus,
     txn: &mut PgConnection,
+    dpf_sdk: Option<&dyn DpfOperations>,
 ) -> Result<(), StateHandlerError> {
     if extension_services_status.configs_synced != SyncState::Synced {
         return Ok(());
@@ -8917,6 +9009,36 @@ async fn cleanup_terminated_extension_services(
         terminated_extension_services = ?terminated_service_keys,
         "Cleaning up fully terminated extension services from instance config"
     );
+
+    // Every DPU has acknowledged termination, so this is the cleanup-
+    // acknowledged moment for VPC-bound services: remove their DPF CRs first
+    // (an error aborts the transaction and retries next reconcile), then
+    // release the endpoint /127 reservations in the same transaction that
+    // drops the services from the config.
+    for &(service_id, version) in &terminated_service_keys {
+        let Some(config) = instance
+            .config
+            .extension_services
+            .service_configs
+            .iter()
+            .find(|c| c.service_id == service_id && c.version == version)
+        else {
+            continue;
+        };
+        let Some(attachment_id) = config.attachment_id else {
+            continue;
+        };
+        if let Some(dpf) = dpf_sdk {
+            dpf.remove_service_vpc_attachments(&attachment_id.to_string())
+                .await
+                .map_err(|e| {
+                    StateHandlerError::GenericError(eyre!(
+                        "failed to remove service-VPC CRs for attachment {attachment_id}: {e}"
+                    ))
+                })?;
+        }
+        db::service_vpc_endpoint::delete_by_attachment(&mut *txn, attachment_id).await?;
+    }
     let new_config = instance
         .config
         .extension_services

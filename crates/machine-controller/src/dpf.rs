@@ -23,7 +23,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use carbide_dpf::types::{
     DetachedDpuServiceDefinition, DpuServiceObservation, DpuServiceVersion, HostDpfSnapshot,
-    ServiceTemplateVersion,
+    ServiceTemplateVersion, ServiceVpcAttachmentRequest,
 };
 use carbide_dpf::{
     BmcPasswordProvider, DPU_ENABLED_NODE_LABEL, DpfError, DpfSdk, DpuDeploymentType,
@@ -42,8 +42,9 @@ use crate::handler::is_bf4_dmi_product;
 use crate::io::MachineStateControllerIO;
 
 /// Label key used by [`CarbideDPFLabeler`] to stamp the carbide `MachineId` of
-/// the DPU onto its DPUDevice. Propagates to the DPU CR via DPF.
-const DPU_MACHINE_ID_LABEL: &str = "carbide.nvidia.com/dpu-machine-id";
+/// the DPU onto its DPUDevice. Propagates to the DPU CR via DPF. Shares the
+/// dpf-crate constant so the service-VPC node selectors match the same key.
+const DPU_MACHINE_ID_LABEL: &str = carbide_dpf::DPU_MACHINE_ID_NODE_LABEL;
 
 /// Label key used by [`CarbideDPFLabeler`] to mark a DPU device as
 /// carbide-controlled. Propagates to the DPU CR.
@@ -176,6 +177,27 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         dpu_device_name: &str,
         changes: BTreeMap<String, Option<String>>,
     ) -> Result<(), DpfError>;
+
+    /// Idempotently apply the service-VPC CRs (NAD, DPUServiceInterface,
+    /// DPUServiceChain) for one (attachment, DPU) pair and label its
+    /// DPU-cluster node so the CRs' node selectors resolve to that DPU.
+    async fn ensure_service_vpc_attachment(
+        &self,
+        req: &ServiceVpcAttachmentRequest,
+    ) -> Result<(), DpfError>;
+
+    /// Delete every service-VPC CR of one attachment across all of its DPUs.
+    /// Absent CRs are not an error, so the call is safe to retry.
+    async fn remove_service_vpc_attachments(&self, attachment_id: &str) -> Result<(), DpfError>;
+
+    /// Best-effort readiness probe: whether the pair's DPUServiceInterface and
+    /// DPUServiceChain both exist and report `Ready: True`. Observed for
+    /// logging only; the agent's config-version ack remains the gate.
+    async fn service_vpc_attachment_ready(
+        &self,
+        attachment_id: &str,
+        dpu_machine_id: &str,
+    ) -> Result<bool, DpfError>;
 }
 
 /// Check whether the DPUNode and DPUDevice CRs are missing for the given host.
@@ -780,6 +802,27 @@ impl DpfOperations for DpfSdkOps {
     ) -> Result<(), DpfError> {
         self.sdk
             .merge_dpu_device_node_labels(dpu_device_name, changes)
+            .await
+    }
+
+    async fn ensure_service_vpc_attachment(
+        &self,
+        req: &ServiceVpcAttachmentRequest,
+    ) -> Result<(), DpfError> {
+        self.sdk.ensure_service_vpc_attachment(req).await
+    }
+
+    async fn remove_service_vpc_attachments(&self, attachment_id: &str) -> Result<(), DpfError> {
+        self.sdk.remove_service_vpc_attachments(attachment_id).await
+    }
+
+    async fn service_vpc_attachment_ready(
+        &self,
+        attachment_id: &str,
+        dpu_machine_id: &str,
+    ) -> Result<bool, DpfError> {
+        self.sdk
+            .service_vpc_attachment_ready(attachment_id, dpu_machine_id)
             .await
     }
 }
