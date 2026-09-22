@@ -10,6 +10,9 @@ Services for mock BMC endpoints.
 - Creates ClusterIP Services with BMC IP for each mock BMC
 - Supports Redfish (TCP 443), IPMI (UDP 623), and per-machine SSH ports
 - IPMI and SSH ports are dynamically added when machine-a-tron reports their endpoints in status
+- Creates a ClusterIP Service with the NVOS IP for each simulated NVLink switch
+  once it has one, forwarding the NMX-C port (TCP 9370) to machine-a-tron's
+  hosted NMX-C mock
 - Multi-pod deployments with pod-specific routing
 - Automatic cleanup of stale Services
 
@@ -73,7 +76,7 @@ Created Services have:
 
 - `app.kubernetes.io/managed-by: mat-k8s-controller`
 - `nvidia-infra-controller/mat-id: <uuid>`
-- `nvidia-infra-controller/mat-machine-type: host|dpu`
+- `nvidia-infra-controller/mat-machine-type: host|dpu|nvos`
 - `nvidia-infra-controller/pod-name: <pod>` (multi-pod)
 
 **Annotations:**
@@ -90,6 +93,18 @@ Created Services have:
 - `redfish` (TCP) - Always present for Redfish API access
 - `ipmi` (UDP) - Present only when machine-a-tron reports `bmc.ipmi` in status
 - `ssh` (TCP) - Present only when machine-a-tron reports `bmc.ssh` in status
+
+### Switch NVOS Services
+
+A device with `device_kind: switch` and an `nvos_ip` in status additionally
+gets a `mat-nvos-<id>` Service whose ClusterIP is the NVOS IP, labelled
+`mat-machine-type: nvos` and annotated `nvidia-infra-controller/mat-nvos-ip`.
+Its single port, `nmxc` (TCP 9370), targets the same bmc-mock listen port as
+the BMC Service: NICo resolves a rack's NMX-C controller from a switch's NVOS
+address, and machine-a-tron's hosted NMX-C mock answers on its bmc-mock
+listener, selecting the rack by the address the request was sent to. The NVOS
+(underlay) DHCP segment must lie inside the cluster's ServiceCIDR, as the BMC
+segment already must.
 
 ## Development
 

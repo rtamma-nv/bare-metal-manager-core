@@ -130,6 +130,17 @@ nico-api:
       run_interval = "10s"
       concurrency_limit = 100
 
+      # NMX-C is served by machine-a-tron's hosted mock at each simulated
+      # switch's NVOS address. The mock rides on machine-a-tron's own TLS
+      # certificate, issued by the same local CA as nico-roots and carrying
+      # the shared SAN below (nico-machine-a-tron.certificate.extraDnsNames),
+      # so one authority verifies every rack. No client certificate: the mock
+      # does not require client authentication.
+      [nvlink_config]
+      enabled = true
+      nmx_c_tls_ca_cert_path = "/var/run/secrets/nico-roots/ca.crt"
+      nmx_c_tls_authority = "mat-mock.nvidia.com"
+
 nico-bmc-proxy:
   enabled: true
   replicas: 1

@@ -60,6 +60,23 @@ The chart does not aggregate InfiniBand inventory across multiple
 machine-a-tron pods. A full `configFiles.matConfigs` override owns the complete
 MAT configuration, including its `[ufm_mock]` section.
 
+## NMX-C mock
+
+Machine-a-tron also hosts an NMX-C (NVLink controller) mock on the same
+listener, always mounted, answering for every simulated rack. NICo reaches a
+rack's controller at a switch NVOS address on port 9370, so with
+`mat-k8s-controller` enabled the controller creates a `mat-nvos-<id>`
+ClusterIP Service per switch whose ClusterIP is the switch's NVOS address; the
+NVOS DHCP segment must lie inside the cluster's ServiceCIDR.
+
+Because NICo dials by address, it verifies the mock's certificate against
+`nvlink_config.nmx_c_tls_authority`. Every pod's certificate carries
+`certificate.extraDnsNames`, `mat-mock.nvidia.com` by default, for that
+purpose; set NICo's `nmx_c_tls_authority` to it and `nmx_c_tls_ca_cert_path`
+to the CA that issues these certificates. The optional `[nmxc_mock]` section of
+the MAT configuration sets the reported version and the factory partition each
+rack boots with.
+
 ## Logging
 
 The chart defaults `machineATron.logFormat` to `logfmt`, so machine-a-tron emits

@@ -31,6 +31,7 @@ use clap::Parser;
 use duration_str::deserialize_duration;
 use eyre::Context;
 use mac_address::MacAddress;
+use nmxc_mock::NmxcMockConfig;
 use rms_mock::RmsMockConfig;
 use rpc::forge::DesiredFirmwareVersionEntry;
 use rpc::forge_tls_client::ForgeClientConfig;
@@ -584,6 +585,11 @@ pub struct MachineATronConfig {
     /// it is configured with an `rms.api_url` pointing here.
     #[serde(default)]
     pub rms_mock: RmsMockConfig,
+
+    /// The hosted NMX-C mock, always mounted like the RMS mock. NICo reaches
+    /// it at a simulated switch's NVOS address, so nothing here names it.
+    #[serde(default)]
+    pub nmxc_mock: NmxcMockConfig,
 }
 
 impl MachineATronConfig {
