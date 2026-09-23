@@ -24,11 +24,12 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
 use bmc_mock::injection::{InjectionStore, Rule, RuleId};
-use bmc_mock::{HardwareType, RackPlacement, TrayPlacement};
+use bmc_mock::{HardwareType, MockPowerState, RackPlacement, ResourceResetType, TrayPlacement};
 use carbide_uuid::rack::RackId;
 use chrono::{SecondsFormat, Utc};
+use mac_address::MacAddress;
 use nmxc_mock::{NmxcInventory, SimComputeNode, SimDomain, SimGpu, SimSwitch};
-use rms_mock::{RmsInventory, SimNode, SimNodeKind};
+use rms_mock::{PowerOperation, RmsInventory, SimNode, SimNodeKind, SimPowerState};
 use tower::Service;
 use ufm_mock::{
     EpochId, Generation, InventoryId, InventoryMachine as UfmInventoryMachine, InventoryPort,
@@ -39,6 +40,7 @@ use uuid::Uuid;
 use crate::device_handle::DeviceHandle;
 use crate::device_simulator::{DeviceSimulator, SimulatorLifecycle};
 use crate::discovery_info;
+use crate::expected_inventory::ExpectedInventorySummary;
 use crate::rack::RackInstance;
 use crate::simulator_registry::SimulatorRegistry;
 use crate::status::{DeviceKind, DeviceStatus, DeviceStatusConfig, DevicesStatusResponse};
@@ -53,6 +55,10 @@ pub fn append(router: Option<Router>, control_state: ControlState) -> Router {
         .route("/machines/status", get(get_machines_status))
         .route("/racks/status", get(get_racks_status))
         .route("/racks/{rack_id}/status", get(get_rack_status))
+        .route(
+            "/expected-inventory/status",
+            get(get_expected_inventory_status),
+        )
         .route(
             "/machines/{id}/bmc/injection/rules",
             get(list_bmc_injection_rules).post(upsert_bmc_injection_rule),
@@ -75,6 +81,7 @@ pub struct ControlState {
     inventory_version: Arc<Mutex<InventoryVersion>>,
     rms_snapshot: Arc<Mutex<RmsSnapshot>>,
     nmxc_snapshot: Arc<Mutex<NmxcSnapshot>>,
+    expected_inventory: Arc<ExpectedInventorySummary>,
 }
 
 #[derive(Debug)]
@@ -125,6 +132,13 @@ struct InventoryMachine {
 }
 
 impl ControlState {
+    fn device_by_bmc_mac(&self, bmc_mac: MacAddress) -> eyre::Result<&DeviceHandle> {
+        self.simulators
+            .find_by_bmc_mac(bmc_mac)
+            .map(SimulatorLifecycle::handle)
+            .ok_or_else(|| eyre::eyre!("no simulated device has BMC MAC {bmc_mac}"))
+    }
+
     pub fn new(
         simulators: SimulatorRegistry,
         status_config: DeviceStatusConfig,
@@ -144,7 +158,15 @@ impl ControlState {
             })),
             rms_snapshot: Arc::default(),
             nmxc_snapshot: Arc::default(),
+            expected_inventory: Arc::default(),
         }
+    }
+
+    /// Publishes the startup expected inventory registration outcome on
+    /// `/expected-inventory/status`.
+    pub fn with_expected_inventory(mut self, summary: ExpectedInventorySummary) -> Self {
+        self.expected_inventory = Arc::new(summary);
+        self
     }
 
     fn devices_status(&self) -> DevicesStatusResponse {
@@ -262,6 +284,42 @@ impl RmsInventory for ControlState {
         }
         Arc::clone(&cached.nodes)
     }
+
+    fn power_state(&self, bmc_mac: MacAddress) -> eyre::Result<SimPowerState> {
+        Ok(match self.device_by_bmc_mac(bmc_mac)?.power_state() {
+            MockPowerState::Unknown => eyre::bail!("device power state is unavailable"),
+            MockPowerState::On => SimPowerState::On,
+            // The Redfish mock reports a cycling device as off until the
+            // cycle's delay has run, and RMS has no state in between.
+            MockPowerState::Off | MockPowerState::PowerCycling { .. } => SimPowerState::Off,
+            // Likewise for the transitional Redfish states: RMS reports the
+            // state the transition started from until it completes.
+            MockPowerState::PoweringOn => SimPowerState::Off,
+            MockPowerState::PoweringOff => SimPowerState::On,
+        })
+    }
+
+    fn set_power(&self, bmc_mac: MacAddress, op: PowerOperation) -> eyre::Result<()> {
+        let control = power_control_for(op)?;
+        self.device_by_bmc_mac(bmc_mac)?.set_system_power(control)?;
+        Ok(())
+    }
+}
+
+/// The Redfish reset an RMS power operation stands for; RMS documents `RESET`
+/// as a power cycle and `OFF` as a graceful shutdown.
+fn power_control_for(op: PowerOperation) -> eyre::Result<ResourceResetType> {
+    Ok(match op {
+        PowerOperation::Unspecified => eyre::bail!("power operation is unspecified"),
+        PowerOperation::On | PowerOperation::ForceOn => ResourceResetType::On,
+        PowerOperation::Off | PowerOperation::GracefulShutdown => {
+            ResourceResetType::GracefulShutdown
+        }
+        PowerOperation::ForceOff => ResourceResetType::ForceOff,
+        PowerOperation::Reset => ResourceResetType::PowerCycle,
+        PowerOperation::GracefulRestart => ResourceResetType::GracefulRestart,
+        PowerOperation::ForceRestart => ResourceResetType::ForceRestart,
+    })
 }
 
 impl ControlState {
@@ -487,6 +545,12 @@ async fn get_rack_status(
         .unwrap_or_else(|| (StatusCode::NOT_FOUND, "rack not found").into_response())
 }
 
+async fn get_expected_inventory_status(
+    State(state): State<ControlRouter>,
+) -> Json<ExpectedInventorySummary> {
+    Json(state.control_state.expected_inventory.as_ref().clone())
+}
+
 async fn get_machines_ui() -> Html<&'static str> {
     Html(include_str!("../web/index.html"))
 }
@@ -577,13 +641,14 @@ mod tests {
     use carbide_uuid::rack::{RackId, RackProfileId};
     use mac_address::MacAddress;
     use nmxc_mock::NmxcInventory;
-    use rms_mock::RmsInventory;
+    use rms_mock::{PowerOperation, RmsInventory, SimPowerState};
     use tower::ServiceExt;
     use uuid::Uuid;
 
     use super::{ControlState, append};
     use crate::device_simulator::DeviceSimulator;
     use crate::dpu_machine::DpuMachineHandle;
+    use crate::expected_inventory::ExpectedInventorySummary;
     use crate::rack::{RackMemberRegistration, RackRegistration};
     use crate::simulator_registry::SimulatorRegistry;
     use crate::status::DeviceStatusConfig;
@@ -814,6 +879,61 @@ mod tests {
         let state = rack_control_state(handle);
 
         assert!(state.domains().is_empty());
+    }
+
+    /// RMS power reads the BMC's own state and is refused by the BMC's own
+    /// guard.
+    #[test]
+    fn rms_power_is_the_bmc_power() {
+        let handle = DeviceHandle::for_control_test(Vec::new(), None);
+        let state = control_state(vec![handle]);
+        let mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
+
+        assert_eq!(state.power_state(mac).unwrap(), SimPowerState::On);
+        let refused = state
+            .set_power(mac, PowerOperation::On)
+            .expect_err("the BMC refuses to power on a machine that is on")
+            .to_string();
+        assert!(refused.contains("already on"), "{refused}");
+        assert_eq!(state.power_state(mac).unwrap(), SimPowerState::On);
+
+        let unknown = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x99]);
+        assert!(state.power_state(unknown).is_err());
+    }
+
+    #[tokio::test]
+    async fn expected_inventory_status_reports_registration_summary() {
+        let summary = ExpectedInventorySummary {
+            registered: 3,
+            already_present: 1,
+            failed_identifiers: vec!["switch SW1 (02:00:00:00:00:01)".to_string()],
+        };
+        let router = append(
+            None,
+            control_state(Vec::new()).with_expected_inventory(summary),
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/expected-inventory/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "registered": 3,
+                "already_present": 1,
+                "failed_identifiers": ["switch SW1 (02:00:00:00:00:01)"],
+            })
+        );
     }
 
     #[tokio::test]

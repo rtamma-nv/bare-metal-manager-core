@@ -145,7 +145,7 @@ pub struct ResolvedNvosArtifact {
     pub version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NvosUpdateSwitchStatus {
     #[serde(default)]
     pub node_id: String,
@@ -157,6 +157,34 @@ pub struct NvosUpdateSwitchStatus {
     pub job_id: Option<String>,
     #[serde(default)]
     pub error_message: Option<String>,
+
+    /// Desired-password recovery after the image operation.
+    #[serde(default)]
+    pub password_update: NvosPasswordUpdateState,
+}
+
+/// Persisted desired-password recovery state for one switch in an NVOS update.
+///
+/// The state starts at [`Self::NotStarted`], advances to [`Self::InProgress`]
+/// after the backend accepts a recovery job, and reaches [`Self::Completed`]
+/// after the backend confirms the desired password. A backend-reported failure
+/// transitions the rack to [`RackState::Error`]. An unresolved job returns the
+/// state to [`Self::NotStarted`] so the same credentials can be resubmitted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum NvosPasswordUpdateState {
+    /// No password recovery job has been submitted.
+    #[default]
+    NotStarted,
+
+    /// The backend accepted a password recovery job that has not completed.
+    InProgress {
+        /// Backend-owned job ID used to poll the recovery operation.
+        job_id: String,
+    },
+
+    /// RMS confirmed the desired password.
+    Completed,
 }
 
 /// Per-device input passed to RMS when starting a firmware upgrade.
@@ -370,6 +398,19 @@ impl<'r> FromRow<'r, PgRow> for Rack {
 // RACK STATES
 // ============================================================================
 
+/// Determines how a rack can leave [`RackState::Error`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RackErrorRecoveryPolicy {
+    /// The rack returns to Ready after all attached components become Ready.
+    /// Also applies when a persisted Error state has no recovery metadata.
+    #[default]
+    ComponentsReady,
+
+    /// The rack remains in Error until an operator requests rack maintenance.
+    MaintenanceRequestRequired,
+}
+
 /// State of a Rack as tracked by the controller.
 ///
 /// The rack progresses through discovery and maintenance phases, then enters
@@ -430,7 +471,14 @@ pub enum RackState {
     },
 
     /// There is error in the Rack; Rack can not be used if it's in error.
-    Error { cause: String },
+    Error {
+        /// Description of the failure that moved the rack to Error.
+        cause: String,
+
+        /// Policy controlling when the rack may leave Error.
+        #[serde(default)]
+        recovery_policy: RackErrorRecoveryPolicy,
+    },
 
     /// Rack is in the process of deleting.
     Deleting,
@@ -490,11 +538,10 @@ impl Display for RackMaintenanceState {
 
 /// Sub-states of `RackMaintenanceState::ConfigureNmxCluster`.
 ///
-/// `Start` submits the asynchronous RMS ScaleUpFabricManager workflow.
-/// `WaitForScaleUpFabricManagerJob` polls the submitted job; after it
-/// completes, NICo reads the observed fabric status, validates the
-/// RMS-selected primary, persists it with the per-switch Fabric Manager
-/// status, and advances to the next requested maintenance activity.
+/// `Start` rotates every rack switch's NVUE certificate before submitting the
+/// asynchronous RMS ScaleUpFabricManager workflow.
+/// `WaitForSwitchCertificateJob` polls the certificate batch, and
+/// `WaitForScaleUpFabricManagerJob` polls the fabric-manager job.
 ///
 /// The remaining variants name sub-states of a workflow this version does not
 /// run. A `controller_state` row can still hold one, so they are decoded to
@@ -503,6 +550,12 @@ impl Display for RackMaintenanceState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfigureNmxClusterState {
     Start,
+
+    /// Waits for the RMS switch-certificate batch to complete.
+    WaitForSwitchCertificateJob {
+        /// Parent RMS job identifier returned by batch certificate configuration.
+        job_id: String,
+    },
 
     WaitForScaleUpFabricManagerJob {
         /// RMS job identifier returned by submission.
@@ -527,6 +580,9 @@ impl Display for ConfigureNmxClusterState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConfigureNmxClusterState::Start => write!(f, "Start"),
+            ConfigureNmxClusterState::WaitForSwitchCertificateJob { job_id } => {
+                write!(f, "WaitForSwitchCertificateJob({job_id})")
+            }
             ConfigureNmxClusterState::WaitForScaleUpFabricManagerJob { job_id } => {
                 write!(f, "WaitForScaleUpFabricManagerJob({job_id})")
             }
@@ -677,7 +733,7 @@ impl Display for RackState {
             RackState::Maintenance { maintenance_state } => {
                 write!(f, "Maintenance({})", maintenance_state)
             }
-            RackState::Error { cause } => write!(f, "Error({})", cause),
+            RackState::Error { cause, .. } => write!(f, "Error({})", cause),
             RackState::Deleting => write!(f, "Deleting"),
         }
     }
@@ -987,6 +1043,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rack_error_recovery_policy_decodes_legacy_and_explicit_states() {
+        scenarios!(
+            run = |encoded| serde_json::from_str::<RackState>(encoded).map_err(|error| error.to_string());
+
+            "legacy error retains automatic component recovery" {
+                r#"{"state":"error","cause":"switch failed"}"# => Yields(RackState::Error {
+                    cause: "switch failed".to_string(),
+                    recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+                }),
+            }
+
+            "maintenance error requires a new request" {
+                r#"{"state":"error","cause":"maintenance failed","recovery_policy":"maintenance_request_required"}"# => Yields(RackState::Error {
+                    cause: "maintenance failed".to_string(),
+                    recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+                }),
+            }
+        );
+    }
+
     // ── MaintenanceScope ────────────────────────────────────────────────
 
     #[test]
@@ -1173,6 +1250,16 @@ mod tests {
         assert!(config.maintenance_termination_requested);
     }
 
+    #[test]
+    fn nvos_switch_status_defaults_missing_password_update_state() {
+        let status: NvosUpdateSwitchStatus = serde_json::from_str(
+            r#"{"mac":"00:11:22:33:44:55","bmc_ip":"192.0.2.10","nvos_ip":"192.0.2.20","status":"completed"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(status.password_update, NvosPasswordUpdateState::NotStarted);
+    }
+
     // ── Rack::check_accepts_maintenance ─────────────────────────────────
 
     fn test_rack(state: RackState, maintenance_requested: Option<MaintenanceScope>) -> Rack {
@@ -1224,6 +1311,7 @@ mod tests {
                 (
                     RackState::Error {
                         cause: "something broke".into(),
+                        recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
                     },
                     None,
                 ) => Yields(()),

@@ -178,7 +178,11 @@ async fn validate_vpc_prefix_overlaps(
 /// A retained VNI may still carry routes from a previous profile. Overlap
 /// admission requires one owned allocation, not just a matching active VNI.
 /// The caller holds the VPC mutation lock until the prefix write completes.
-async fn validate_overlap_vni(api: &Api, txn: &mut PgConnection, vpc: &Vpc) -> CarbideResult<()> {
+pub(super) async fn validate_overlap_vni(
+    api: &Api,
+    txn: &mut PgConnection,
+    vpc: &Vpc,
+) -> CarbideResult<()> {
     let owner_id = vpc.id.to_string();
     let mut allocation = None;
     for pool in [
@@ -376,6 +380,14 @@ pub(crate) async fn create(
     )
     .await?;
 
+    super::vpc_peering::validate_prefix_attachment(
+        api,
+        &mut txn,
+        new_prefix.vpc_id,
+        new_prefix.config.prefix,
+    )
+    .await?;
+
     let segment_prefixes = db::probe_segment_prefixes(new_prefix.config.prefix, &mut txn).await?;
     let segment_prefixes = adoptable_segment_prefixes(segment_prefixes, new_prefix.vpc_id)?;
 
@@ -399,6 +411,15 @@ pub(crate) async fn create(
         .metadata
         .validate(true)
         .map_err(CarbideError::from)?;
+
+    new_prefix.overlap_vpc_id = selected_site_prefix.as_ref().and_then(|site_prefix| {
+        super::tenant_prefix_overlap::vpc_prefix_overlap_scope(
+            &api.runtime_config,
+            site_prefix,
+            vpc,
+            new_prefix.config.prefix,
+        )
+    });
 
     let vpc_prefix = db::persist(new_prefix, expected_vpc_version, &mut txn).await?;
     let vpc_prefix_id = vpc_prefix.id;

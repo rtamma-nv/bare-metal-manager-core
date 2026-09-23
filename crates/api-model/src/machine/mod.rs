@@ -493,7 +493,7 @@ impl ManagedHostStateSnapshot {
     /// - the Machine to be in `Ready` state
     /// - the Machine has not yet been target of an instance creation request
     /// - no health alerts which classification `PreventAllocations` to be set
-    /// - the machine not to be in Maintenance Mode
+    /// - no pending or operator maintenance, even when `allow_unhealthy` is true
     /// - the desired boot-interface generation to have a matching observation
     pub fn is_usable_as_instance(&self, allow_unhealthy: bool) -> Result<(), NotAllocatableReason> {
         // TODO: allow other states than Ready when allow_unhealthy=true. Will require changes to state machine (see Matthias).
@@ -508,6 +508,13 @@ impl ManagedHostStateSnapshot {
         // To avoid that race condition, need to check if db has any entry with given machine id.
         if self.instance.is_some() {
             return Err(NotAllocatableReason::PendingInstanceCreation);
+        }
+
+        let host = &self.host_snapshot;
+        if host.machine_maintenance_requested.is_some()
+            || host.health_reports.maintenance_override().is_some()
+        {
+            return Err(NotAllocatableReason::MaintenanceMode);
         }
 
         // A desired boot-interface update and instance allocation can race
@@ -869,6 +876,10 @@ pub struct Machine<ID: MachineIdSubtypeTrait> {
     /// Last time when host reprovision requested
     pub host_reprovision_requested: Option<HostReprovisionRequest>,
 
+    /// When set by an operator, the state controller tears down the host's instance
+    /// and DPF resources, then re-ingests it.
+    pub reset_requested: Option<ResetRequest>,
+
     /// When set by an external entity, the state controller transitions the host into
     /// [`ManagedHostState::Maintenance`] to execute the requested operation.
     pub machine_maintenance_requested: Option<MachineMaintenanceRequest>,
@@ -956,6 +967,7 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
             health_reports: self.health_reports,
             reprovision_requested: self.reprovision_requested,
             host_reprovision_requested: self.host_reprovision_requested,
+            reset_requested: self.reset_requested,
             machine_maintenance_requested: self.machine_maintenance_requested,
             decommission_requested: self.decommission_requested,
             bmc_credential_rotation_requested: self.bmc_credential_rotation_requested,
@@ -1364,6 +1376,11 @@ pub enum ManagedHostState {
         decommissioning_state: DecommissioningState,
     },
 
+    /// Host is being torn down and re-ingested at an operator's request.
+    Reset {
+        reset_state: ResetState,
+    },
+
     /// An unassigned Ready host is converging its Redfish boot configuration
     /// to the desired boot interface persisted on the machine.
     ///
@@ -1384,6 +1401,10 @@ pub enum ManagedHostState {
     /// Host is executing an operator-requested maintenance operation.
     Maintenance {
         operation: MachineMaintenanceOperation,
+        /// The request admitted before external work began. Older saved states
+        /// omit this, so their completion must leave pending requests alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<MachineMaintenanceRequest>,
     },
 
     /// Host is assigned to an Instance.
@@ -1574,6 +1595,19 @@ pub enum DeconfiguringDpuState {
     Complete,
 }
 
+/// Sub-states of [`ManagedHostState::Reset`]: delete the tenant instance, then delete
+/// the DPF CRs and wait for them to drain before re-ingesting from DPU discovery.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+#[allow(clippy::enum_variant_names)] // Both steps delete; the object deleted is the distinction
+pub enum ResetState {
+    DeletingInstance,
+    /// Deletes the CRs and polls until they are gone. Registration refuses a CR that
+    /// still carries a deletionTimestamp, so re-ingestion has to wait for the drain
+    /// rather than for the delete to be accepted.
+    DeletingCrs,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum AttestationMode {
@@ -1757,9 +1791,13 @@ impl std::fmt::Display for ValidationState {
 pub const MAX_FIRMWARE_UPGRADE_RETRIES: u32 = 5;
 
 impl ManagedHostState {
-    /// Builds the controller state for a requested maintenance operation.
-    pub fn maintenance_for_operation(operation: MachineMaintenanceOperation) -> Self {
-        Self::Maintenance { operation }
+    /// Starts `Maintenance` with the requested operation and saves the full
+    /// request so completion can check whether it is still pending.
+    pub fn maintenance_for_request(request: MachineMaintenanceRequest) -> Self {
+        Self::Maintenance {
+            operation: request.operation.clone(),
+            request: Some(request),
+        }
     }
 
     /// Returns the DPU reprovision states embedded in either host allocation mode.
@@ -2321,6 +2359,11 @@ pub struct LockdownInfo {
 pub struct UefiSetupInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uefi_password_jid: Option<String>,
+    /// Site-wide version selected for an ingestion password job. Absent before
+    /// dispatch and in saved ingestion jobs created without version tracking.
+    /// Rotation jobs track their version in `device_credential_rotation` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_version: Option<u32>,
     pub uefi_setup_state: UefiSetupState,
 }
 
@@ -2665,7 +2708,7 @@ pub struct ReprovisionRequest {
     pub restart_reprovision_requested_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "lowercase")]
 #[allow(clippy::enum_variant_names)]
 pub enum MachineMaintenanceOperation {
@@ -2675,6 +2718,8 @@ pub enum MachineMaintenanceOperation {
     PowerOff,
     /// Reset the host (restart / AC power cycle).
     Reset,
+    /// Reset the identified Redfish chassis through the host BMC.
+    ChassisReset { chassis_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2692,6 +2737,14 @@ pub struct HostReprovisionRequest {
     pub started_at: Option<DateTime<Utc>>,
     pub user_approval_received: bool,
     pub request_reset: Option<bool>,
+}
+
+/// Struct to store information if a managed host reset is requested.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetRequest {
+    pub requested_at: DateTime<Utc>,
+    pub initiator: String,
+    pub started_at: Option<DateTime<Utc>>,
 }
 
 pub use crate::rack::RackFirmwareUpgradeStatus;
@@ -2913,12 +2966,13 @@ impl Display for ManagedHostState {
             ManagedHostState::Decommissioning {
                 decommissioning_state,
             } => write!(f, "Decommissioning/{decommissioning_state}"),
+            ManagedHostState::Reset { reset_state } => write!(f, "Reset/{reset_state:?}"),
             ManagedHostState::BootConfiguring {
                 boot_config_state, ..
             } => {
                 write!(f, "BootConfiguring/{boot_config_state}")
             }
-            ManagedHostState::Maintenance { operation } => {
+            ManagedHostState::Maintenance { operation, .. } => {
                 write!(f, "Maintenance({operation:?})")
             }
             ManagedHostState::Assigned { instance_state, .. } => match instance_state {
@@ -3027,12 +3081,13 @@ impl ManagedHostState {
             ManagedHostState::Decommissioning {
                 decommissioning_state,
             } => format!("Decommissioning/{decommissioning_state}"),
+            ManagedHostState::Reset { reset_state } => format!("Reset/{reset_state:?}"),
             ManagedHostState::BootConfiguring {
                 boot_config_state, ..
             } => {
                 format!("BootConfiguring/{boot_config_state}")
             }
-            ManagedHostState::Maintenance { operation } => {
+            ManagedHostState::Maintenance { operation, .. } => {
                 format!("Maintenance({operation:?})")
             }
             ManagedHostState::Assigned { instance_state } => match instance_state {
@@ -3283,6 +3338,7 @@ pub fn state_sla(
             ),
             DecommissioningState::Decommissioned => StateSla::no_sla(),
         },
+        ManagedHostState::Reset { .. } => StateSla::with_sla(slas::RESET, time_in_state),
         ManagedHostState::BootConfiguring {
             boot_config_state: ReadyBootConfigState::Failed { .. },
             ..
@@ -4000,6 +4056,47 @@ mod tests {
             snapshot.is_usable_as_instance(false),
             Err(NotAllocatableReason::PendingBootConfiguration)
         );
+    }
+
+    #[test]
+    fn ready_host_with_pending_maintenance_is_not_allocatable() {
+        let mut snapshot = managed_host_state_snapshot();
+        snapshot.host_snapshot.machine_maintenance_requested = Some(MachineMaintenanceRequest {
+            requested_at: chrono::Utc::now(),
+            initiator: "test".to_string(),
+            operation: MachineMaintenanceOperation::ChassisReset {
+                chassis_id: "HGX_Chassis_0".to_string(),
+            },
+        });
+
+        assert_eq!(
+            snapshot.is_usable_as_instance(false),
+            Err(NotAllocatableReason::MaintenanceMode),
+        );
+    }
+
+    #[test]
+    fn operator_maintenance_blocks_allocation_until_cleared() {
+        let mut snapshot = managed_host_state_snapshot();
+        let mut alert = alert_with_classifications(vec![
+            health_report::HealthAlertClassification::prevent_allocations(),
+        ]);
+        alert.id = "Maintenance".parse().unwrap();
+        snapshot.host_snapshot.health_reports.merges.insert(
+            "maintenance".to_string(),
+            health_report_with_alerts(vec![alert]),
+        );
+
+        assert_eq!(
+            snapshot.is_usable_as_instance(true),
+            Err(NotAllocatableReason::MaintenanceMode),
+        );
+        snapshot
+            .host_snapshot
+            .health_reports
+            .merges
+            .remove("maintenance");
+        assert_eq!(snapshot.is_usable_as_instance(true), Ok(()));
     }
 
     #[test]
@@ -4913,6 +5010,7 @@ mod tests {
                     scenario: "maintenance uses the maintenance SLA",
                     input: stale(ManagedHostState::Maintenance {
                         operation: MachineMaintenanceOperation::PowerOn,
+                        request: None,
                     }),
                     expect: (seconds(300), true),
                 },
